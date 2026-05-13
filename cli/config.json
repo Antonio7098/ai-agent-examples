@@ -1,0 +1,5 @@
+{
+  "defaultModel": "opencode/deepseek-v4-flash-free",
+  "defaultVariant": "high",
+  "defaultParallel": 3
+}

@@ -1,0 +1,9 @@
+{
+  "name": "ai-study",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CLI for orchestrating AI agent system studies across protocol dimensions and repo groups",
+  "bin": {
+    "ai-study": "./src/index.ts"
+  }
+}
