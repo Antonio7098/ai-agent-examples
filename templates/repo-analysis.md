@@ -18,8 +18,10 @@
 
 ## Evidence Collected
 
-| Area | Evidence | Location |
-|------|----------|----------|
+Every entry MUST include a file path with line numbers. Format: `path/to/file.ts:NN`.
+
+| Area | Evidence | File:Line |
+|------|----------|-----------|
 {{evidence_rows}}
 
 ## Answers to Protocol Questions
@@ -42,7 +44,7 @@
 
 {{failure_modes}}
 
-## Implications for `../HelloSales`
+## Implications for `HelloSales/`
 
 {{hellosales_implications}}
 

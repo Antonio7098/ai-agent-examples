@@ -6,7 +6,7 @@
 |-------|-------|
 | Protocol | `{{protocol_file}}` |
 | Group | `{{repo_group}}` ({{group_title}}) |
-| Target Comparison | `../HelloSales` |
+| Target Comparison | `HelloSales/` |
 | Date | {{date}} |
 
 ## Repositories Studied
@@ -39,11 +39,11 @@
 
 ### Tradeoff Matrix
 
-| Dimension | Strongest Example | Alternative Approach | Tradeoff |
-|-----------|-------------------|----------------------|----------|
+| Dimension | Strongest Example (File:Line) | Alternative Approach | Tradeoff |
+|-----------|-------------------------------|----------------------|----------|
 {{tradeoff_matrix_rows}}
 
-## Comparison with `../HelloSales`
+## Comparison with `HelloSales/`
 
 ### Similar Patterns
 
@@ -78,6 +78,8 @@
 {{open_questions}}
 
 ## Evidence Index
+
+Every evidence reference in this report follows the `path/to/file.ts:NN` format. Below is a consolidated index.
 
 {{evidence_index}}
 

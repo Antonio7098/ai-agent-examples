@@ -1,5 +1,6 @@
 {
   "defaultModel": "opencode/deepseek-v4-flash-free",
   "defaultVariant": "high",
-  "defaultParallel": 3
+  "defaultParallel": 3,
+  "defaultTimeoutMs": 1800000
 }

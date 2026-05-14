@@ -20,13 +20,14 @@ interface Config {
   defaultModel: string
   defaultVariant: string
   defaultParallel: number
+  defaultTimeoutMs: number
 }
 
 function loadConfig(): Config {
   try {
     return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"))
   } catch {
-    return { defaultModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3 }
+    return { defaultModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3, defaultTimeoutMs: 1800000 }
   }
 }
 
@@ -119,14 +120,17 @@ function buildPrompt(protocol: Protocol, group: Group): string {
     "",
     `1. Read \`${BASE_PROTOCOL}\` for execution instructions, template usage, and output structure.`,
     `2. Read \`${protoFile}\` for the specific Steps, Evidence, and Questions.`,
-    `3. For **each** elite repo in the list above:`,
+    `3. **HARD RULES**:`,
+    `   - When studying a repo, NEVER access files outside that repo's directory. BANNED.`,
+    `   - EVERY code mention MUST include \`path/to/file.ts:NN\`. No exceptions.`,
+    `4. For **each** elite repo in the list above:`,
     `   - Explore the repo's source code following the protocol's Steps and Evidence sections.`,
     `   - Answer all the protocol's Questions.`,
     `   - Write a per-repo analysis to \`${resultsDir}/{repo-name}.md\``,
     `     using \`templates/repo-analysis.md\`.`,
-    `4. Study \`../HelloSales\` against the same protocol and write findings to`,
+    `5. Study \`HelloSales/\` against the same protocol and write findings to`,
     `   \`${resultsDir}/hellosales.md\` using \`templates/repo-analysis.md\`.`,
-    `5. After ALL repos are analyzed (elite + HelloSales):`,
+    `6. After ALL repos are analyzed (elite + HelloSales):`,
     `   - Read all per-repo analysis files.`,
     `   - Create a single combined report at \`${reportFile}\` using \`templates/report.md\`.`,
     `   - Fill in all template sections including cross-repo comparison, HelloSales findings, and synthesis across all studied systems.`,
@@ -155,7 +159,7 @@ function findOpenCode(): string {
 
 const OPENCODE_BIN = findOpenCode()
 
-function runOpenCode(prompt: string, protocolFile: string, opts: { model?: string; variant?: string; skipPermissions?: boolean }): Promise<{ code: number }> {
+function runOpenCode(prompt: string, protocolFile: string, opts: { model?: string; variant?: string; skipPermissions?: boolean; timeoutMs?: number }): Promise<{ code: number }> {
   return new Promise((resolvePromise, reject) => {
     const args: string[] = ["run", prompt]
     args.push("--dir", STUDY_DIR)
@@ -170,8 +174,21 @@ function runOpenCode(prompt: string, protocolFile: string, opts: { model?: strin
       env: { ...process.env },
     })
 
-    child.on("close", (code) => resolvePromise({ code: code ?? 1 }))
-    child.on("error", reject)
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          console.error(`\n✗ Timed out after ${opts.timeoutMs / 1000}s, killing process...`)
+          child.kill()
+        }, opts.timeoutMs)
+      : null
+
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer)
+      resolvePromise({ code: code ?? 1 })
+    })
+    child.on("error", (err) => {
+      if (timer) clearTimeout(timer)
+      reject(err)
+    })
   })
 }
 
@@ -216,7 +233,7 @@ function cmdList() {
   console.log("  bun run cli/src/index.ts list\n")
 }
 
-async function cmdRun(protocolRef: string, groupRef: string, opts: { model?: string; variant?: string; dryRun?: boolean; skipPermissions?: boolean }) {
+async function cmdRun(protocolRef: string, groupRef: string, opts: { model?: string; variant?: string; dryRun?: boolean; skipPermissions?: boolean; timeoutMs?: number }) {
   const groups = discoverGroups()
   const protocols = discoverProtocols()
   const protocol = resolveProtocol(protocolRef, protocols)
@@ -260,6 +277,7 @@ async function cmdRunAll(opts: {
   dryRun?: boolean
   skipPermissions?: boolean
   parallel?: number
+  timeoutMs?: number
   protocolFilter?: string[]
   groupFilter?: string[]
 }) {
@@ -341,7 +359,7 @@ async function main() {
       }
       case "run": {
         if (positional.length < 2) throw new Error("Usage: ai-study run <protocol-ref> <group-ref> [options]")
-        await cmdRun(positional[0], positional[1], { model, variant, dryRun, skipPermissions: skipPerms })
+        await cmdRun(positional[0], positional[1], { model, variant, dryRun, skipPermissions: skipPerms, timeoutMs: CONFIG.defaultTimeoutMs })
         break
       }
       case "run-all": {
@@ -354,6 +372,7 @@ async function main() {
           variant,
           dryRun,
           skipPermissions: skipPerms,
+          timeoutMs: CONFIG.defaultTimeoutMs,
           parallel: parallel ?? CONFIG.defaultParallel,
           protocolFilter,
           groupFilter,
