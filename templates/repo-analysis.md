@@ -8,13 +8,16 @@
 |-------|-------|
 | Name | {{repo_name}} |
 | Path | `{{repo_path}}` |
-| Group | `{{repo_group}}` |
 | Language / Stack | {{language}} |
 | Analyzed | {{date}} |
 
 ## Summary
 
 {{approach_summary}}
+
+## Rating
+
+{{rating}}
 
 ## Evidence Collected
 
@@ -44,9 +47,9 @@ Every entry MUST include a file path with line numbers. Format: `path/to/file.ts
 
 {{failure_modes}}
 
-## Implications for `HelloSales/`
+## Future Considerations
 
-{{hellosales_implications}}
+{{future_considerations}}
 
 ## Questions / Gaps
 

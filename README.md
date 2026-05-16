@@ -1,127 +1,41 @@
 # AI Agent Systems Comparative Study
 
-This repository supports structured comparison of mature AI agent systems across several architectural ecosystems. The goal is to derive practical architectural standards for `../HelloSales` by studying how strong existing systems handle the same design problems.
+This repository supports structured comparison of mature AI agent systems across several architectural ecosystems. Each repo is studied independently per study area, then synthesized into a combined report.
 
 The focus is agent infrastructure: execution loops, tools, state, safety, observability, governance, evaluation, and coordination. This is not a benchmark suite and not a catalog of framework features.
-
-## Motivation
-
-Enterprise-grade agent systems are still converging. Useful signal comes from comparing real implementations across different traditions:
-
-- **Terminal-native harnesses**: tool execution, planning loops, streaming, sandboxing
-- **Workflow-oriented systems**: deterministic orchestration with AI capabilities
-- **Safety and governance frameworks**: policy engines, guardrails, validation, auditability
-- **Observability and standards ecosystems**: tracing, evaluation, OpenTelemetry, MCP
-- **Multi-agent systems**: coordination, delegation, messaging, shared state
-
-The working thesis:
-
-> Durable workflow engine + bounded agentic execution + tool protocols + strong observability + policy/governance layers
-
-rather than unconstrained autonomous loops.
 
 ## Repository Layout
 
 ```
 ai-agent-examples/
-├── repos/                         # Cloned reference repos, grouped by ecosystem
-│   ├── 01-terminal-harnesses/      # opencode, openhands, aider
-│   ├── 02-workflow-systems/        # langgraph, temporal, mastra
-│   ├── 03-safety-governance/       # guardrails, nemo-guardrails, opa
-│   ├── 04-observability-standards/ # langfuse, openai-agents-python
-│   └── 05-multi-agent/             # autogen
-├── protocols/                     # Study dimensions
+├── repos/                         # Cloned reference repos (flat — 12 repos)
+│   ├── aider/  autogen/  guardrails/  langfuse/
+│   ├── langgraph/  mastra/  nemo-guardrails/
+│   ├── opa/  openai-agents-python/
+│   ├── opencode/  openhands/  temporal/
+├── study-areas/                   # Study dimensions (renamed from protocols/)
 │   ├── base.md                    # Shared execution instructions
 │   ├── 01-execution-semantics.md
 │   ├── 02-state-model.md
-│   └── ...
+│   └── ... (23 dimensions total)
+├── prompts/                       # Synthesis instructions
+│   └── synthesize.md
 ├── templates/                     # Output templates used by study agents
 │   ├── repo-analysis.md           # Per-repo analysis
 │   └── report.md                  # Combined report
 ├── cli/                           # Bun TypeScript CLI
 │   └── src/index.ts
-├── results/                       # Generated per-repo analyses
-└── reports/                       # Generated combined reports
+├── reports/
+│   ├── repo/{NN}-{area-name}/     # Per-repo analyses
+│   └── final/{NN}-{area-name}.md  # Combined reports
+└── results/                       # (legacy, unused)
 ```
-
-Protocols are intentionally split into two layers:
-
-- `protocols/base.md`: shared execution rules, output paths, template usage, and comparison requirements.
-- `protocols/{NN}-{name}.md`: study-specific purpose, steps, evidence, and questions.
 
 ## Target System
 
-`../HelloSales` is the target system for improvement. Every study analyzes the selected reference repos and `../HelloSales` against the same protocol, then produces a combined report with specific gaps and recommendations for HelloSales.
+`../HelloSales` is the target system for improvement. Every study analyzes each reference repo and `../HelloSales` against the same study area, then produces a combined report with specific gaps and recommendations for HelloSales.
 
-## CLI Usage
-
-Run commands from the repository root.
-
-```bash
-# List available groups and protocols
-bun run cli/src/index.ts list
-
-# Study one protocol against one group
-bun run cli/src/index.ts run 01-execution-semantics 01-terminal-harnesses
-bun run cli/src/index.ts run 01 01
-
-# Study multiple protocol/group combinations
-bun run cli/src/index.ts run-all --parallel 3
-bun run cli/src/index.ts run-all --protocols "01,02,03" --groups "01,02"
-bun run cli/src/index.ts run-all --protocols "01,02" --groups "01,02" --parallel 2
-```
-
-### Options
-
-| Flag | Description |
-|------|-------------|
-| `--model <provider/model>` | Model (default: `cli/config.json`) |
-| `--variant <effort>` | Model variant / reasoning effort (`high`, `max`, `minimal`) |
-| `--parallel N` | Max parallel `run-all` invocations (default: `cli/config.json`) |
-| `--dry-run` | Print generated prompts without executing them |
-| `--skip-permissions` | Auto-approve permissions for `opencode` (dangerous) |
-| `--protocols "01,03,05"` | Filter protocols for `run-all` |
-| `--groups "01,02"` | Filter groups for `run-all` |
-
-## How a Study Runs
-
-For each protocol/group pair, the CLI:
-
-1. Reads `protocols/base.md` and the selected protocol file.
-2. Discovers repos in the selected group.
-3. Builds a prompt that instructs the agent to analyze each reference repo and `../HelloSales`.
-4. Attaches the base and specific protocol files to `opencode run`.
-5. Writes per-repo analyses under `results/{NN}-{protocol-name}/`.
-6. Writes one combined report under `reports/{NN}-{group-name}-{NN}-{protocol-name}.md`.
-
-Example output for protocol `01-execution-semantics` against group `01-terminal-harnesses`:
-
-```
-results/01-execution-semantics/
-├── aider.md
-├── hellosales.md
-├── opencode.md
-└── openhands.md
-
-reports/
-└── 01-terminal-harnesses-01-execution-semantics.md
-```
-
-## Study Groups
-
-Each group represents a different architectural ecosystem. Keep each study pass small so the analysis stays concrete.
-
-| Pass | Group | Repos | Purpose |
-|------|-------|-------|---------|
-| 1 | `01-terminal-harnesses` | opencode, openhands, aider | Ground truth for real agent loops, tool use, and streaming |
-| 2 | `02-workflow-systems` | langgraph, temporal, mastra | Contrast exploratory loops with structured orchestration |
-| 3 | `03-safety-governance` | guardrails, nemo-guardrails, opa | Study policy, validation, and control boundaries |
-| 4 | `04-observability-standards` | langfuse, openai-agents-python | Study tracing, evaluation, and standards integration |
-| 5 | `05-multi-agent` | autogen | Study coordination patterns on top of agent runtime primitives |
-
-## Protocols
-
-The 23 protocol dimensions in `protocols/` are:
+## Study Areas (23 Dimensions)
 
 1. **Execution Semantics**: step-based, event-driven, graph, recursive loops
 2. **State Model**: immutable vs mutable state, checkpoints, durable execution
@@ -147,6 +61,82 @@ The 23 protocol dimensions in `protocols/` are:
 22. **Organizational Architecture**: team boundaries, ownership, operating model
 23. **Philosophy of Autonomy**: constrained, exploratory, or deterministic execution
 
+## CLI Usage
+
+Run from the repository root.
+
+```bash
+# List available repos and study areas
+bun run cli/src/index.ts list
+
+# Study one repo against one study area
+bun run cli/src/index.ts run <repo-name> <protocol-ref>
+bun run cli/src/index.ts run opencode 01-execution-semantics
+bun run cli/src/index.ts run opencode 01
+
+# Run all repo × study-area combinations (analyses only, no synthesis)
+bun run cli/src/index.ts run-all --parallel 3
+bun run cli/src/index.ts run-all --protocols "01,02,03" --repos "opencode,aider"
+
+# Synthesize a single study area after all its repos are analyzed
+bun run cli/src/index.ts synthesize 01-execution-semantics
+bun run cli/src/index.ts synthesize 01
+
+# Synthesize all study areas that have all repos analyzed
+bun run cli/src/index.ts synthesize-all --parallel 2
+
+# Stateful batch runner with retry/backoff (analyses + synthesis in one loop)
+bun run cli/src/index.ts run-loop --batch-size 2
+bun run cli/src/index.ts run-loop --protocols "01,02" --repos "opencode,openhands" --batch-size 2
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--model <provider/model>` | Model (default: `cli/config.json`) |
+| `--variant <effort>` | Model variant / reasoning effort (`high`, `max`, `minimal`) |
+| `--parallel N` | Max parallel invocations (default: `cli/config.json`) |
+| `--batch-size N` | Max concurrent tasks for `run-loop` (default: parallel) |
+| `--dry-run` | Print generated prompts without executing them |
+| `--skip-permissions` | Auto-approve permissions for `opencode` (dangerous) |
+| `--timeout <ms>` | Per-task timeout in ms (default: 1800000) |
+| `--protocols "01,03,05"` | Filter study areas for `run-all`, `run-loop`, `synthesize-all` |
+| `--repos "opencode,aider"` | Filter repos for `run-all`, `run-loop` |
+
+## How It Works
+
+1. CLI reads `study-areas/base.md` and the selected study area file.
+2. Discovers all repos in the `repos/` directory.
+3. Each repo × study-area pair gets its own `opencode run` invocation — one repo, one study.
+4. Analyses run in parallel batches via `run-loop`, `run-all`, or single `run`.
+5. Writes per-repo analyses under `reports/repo/{NN}-{area-name}/{repo-name}.md`.
+6. **After** all repos are analyzed for a study area, a separate synthesis call generates the combined report under `reports/final/{NN}-{area-name}.md`.
+
+## Output Structure
+
+```
+reports/
+├── repo/{NN}-{study-area-name}/
+│   ├── {repo-1}.md
+│   ├── {repo-2}.md
+│   └── hellosales.md
+└── final/{NN}-{study-area-name}.md
+```
+
+## Recommended Workflow
+
+1. Run analyses for one or more repos against a study area.
+   - Single: `run opencode 01`
+   - Batch: `run-all --protocols 01 --repos opencode,openhands,aider`
+   - Loop: `run-loop --protocols 01 --batch-size 2`
+2. Review the generated per-repo analyses in `reports/repo/{NN}-{area-name}/`.
+3. Run synthesis once all repos for that study area are analyzed.
+   - Single: `synthesize 01`
+   - All ready: `synthesize-all`
+4. Review the combined report in `reports/final/{NN}-{area-name}.md`.
+5. Apply relevant findings to `../HelloSales`.
+
 ## Analysis Standards
 
 High-quality studies should:
@@ -170,13 +160,3 @@ Use these axes when comparing across reports:
 - **Traceability**: spans, events, causal chains, debugging artifacts
 - **Evaluation**: offline evals, production monitoring, regression tests
 - **Autonomy boundary**: bounded actions vs open-ended exploration
-
-## Recommended Workflow
-
-1. Run one protocol against one group.
-2. Review the generated per-repo analyses in `results/`.
-3. Review the combined report in `reports/`.
-4. Apply relevant findings to `../HelloSales`.
-5. Run the same protocol against another group to compare patterns across ecosystems.
-
-This repository is a comparative study system. The output should help decide which agent architecture patterns are worth adopting, adapting, or rejecting.

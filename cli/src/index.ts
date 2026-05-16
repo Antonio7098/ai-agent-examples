@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-// ai-study CLI — orchestrates agent system studies across protocol dimensions and repo groups
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs"
 import { execSync, spawn } from "child_process"
@@ -10,7 +9,7 @@ import { homedir } from "os"
 
 const ROOT = resolve(import.meta.dirname, "../..")
 const REPOS_DIR = join(ROOT, "repos")
-const PROTOCOLS_DIR = join(ROOT, "protocols")
+const PROTOCOLS_DIR = join(ROOT, "study-areas")
 const CONFIG_FILE = join(ROOT, "cli", "config.json")
 const STUDY_DIR = ROOT
 const STATE_FILE = join(ROOT, ".run-state.json")
@@ -41,14 +40,13 @@ interface Config {
   defaultVariant: string
   defaultParallel: number
   defaultTimeoutMs: number
-  skipPermissions: boolean
 }
 
 function loadConfig(): Config {
   try {
     return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"))
   } catch {
-    return { defaultModel: "minimax-coding-plan/MiniMax-M2.7", primaryModel: "minimax-coding-plan/MiniMax-M2.7", backupModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3, defaultTimeoutMs: 1800000, skipPermissions: true }
+    return { defaultModel: "minimax-coding-plan/MiniMax-M2.7", primaryModel: "minimax-coding-plan/MiniMax-M2.7", backupModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3, defaultTimeoutMs: 1800000 }
   }
 }
 
@@ -56,19 +54,26 @@ const CONFIG = loadConfig()
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Group = { number: string; name: string; title: string; path: string; repos: Repo[] }
 type Repo = { name: string; path: string }
 type Protocol = { number: string; name: string; title: string; file: string }
-
-// ─── State Types ──────────────────────────────────────────────────────────────
 
 interface TaskState {
   protocolNumber: string
   protocolName: string
   protocolTitle: string
-  groupNumber: string
-  groupName: string
-  groupTitle: string
+  repoName: string
+  status: "pending" | "running" | "completed" | "failed"
+  attempts: number
+  lastError: string | null
+  lastAttemptAt: string | null
+  nextRetryAt: string | null
+  completedAt: string | null
+}
+
+interface SynthesisState {
+  protocolNumber: string
+  protocolName: string
+  protocolTitle: string
   status: "pending" | "running" | "completed" | "failed"
   attempts: number
   lastError: string | null
@@ -83,22 +88,17 @@ interface RunState {
   updatedAt: string
   batchSize: number
   tasks: TaskState[]
+  synthesisTasks: SynthesisState[]
   isComplete: boolean
 }
 
 // ─── Discovery ────────────────────────────────────────────────────────────────
 
-function discoverGroups(): Group[] {
-  return readdirSync(REPOS_DIR).filter(d => d.startsWith("0")).sort().map(dir => {
-    const fullPath = join(REPOS_DIR, dir)
-    const dash = dir.indexOf("-")
-    const number = dash > 0 ? dir.slice(0, dash) : dir
-    const name = dir.slice(dash + 1)
-    const repos = readdirSync(fullPath)
-      .filter(d => statSync(join(fullPath, d)).isDirectory() && !d.startsWith("."))
-      .map(r => ({ name: r, path: join(fullPath, r) }))
-    return { number, name, title: name.replace(/-/g, " "), path: fullPath, repos }
-  })
+function discoverRepos(): Repo[] {
+  return readdirSync(REPOS_DIR)
+    .filter(d => statSync(join(REPOS_DIR, d)).isDirectory() && !d.startsWith("."))
+    .sort()
+    .map(d => ({ name: d, path: join(REPOS_DIR, d) }))
 }
 
 function discoverProtocols(): Protocol[] {
@@ -124,67 +124,97 @@ function resolveProtocol(ref: string, all: Protocol[]): Protocol {
   return match[0]
 }
 
-function resolveGroup(ref: string, all: Group[]): Group {
-  const match = all.filter(g =>
-    g.number === ref ||
-    `${g.number}-${g.name}` === ref ||
-    `${g.number}-${g.name}`.startsWith(ref) ||
-    g.name.startsWith(ref)
-  )
-  if (match.length === 0) throw new Error(`Group "${ref}" not found`)
-  if (match.length > 1) throw new Error(`Group "${ref}" is ambiguous: ${match.map(g => `${g.number}-${g.name}`).join(", ")}`)
+function resolveRepo(ref: string, all: Repo[]): Repo {
+  const match = all.filter(r => r.name === ref || r.name.startsWith(ref))
+  if (match.length === 0) throw new Error(`Repo "${ref}" not found`)
+  if (match.length > 1) throw new Error(`Repo "${ref}" is ambiguous: ${match.map(r => r.name).join(", ")}`)
   return match[0]
 }
 
 // ─── Prompt Builder ──────────────────────────────────────────────────────────
 
-const BASE_PROTOCOL = "protocols/base.md"
+const BASE_PROTOCOL = "prompts/base.md"
 
-function buildPrompt(protocol: Protocol, group: Group): string {
-  const repoList = group.repos.map((r, i) =>
-    `${i + 1}. **${r.name}** (\`repos/${group.number}-${group.name}/${r.name}/\`)`
-  ).join("\n")
-  const protoFile = `protocols/${protocol.number}-${protocol.name}.md`
-  const resultsDir = `results/${protocol.number}-${protocol.name}`
-  const reportFile = `reports/${group.number}-${group.name}-${protocol.number}-${protocol.name}.md`
-  const groupTitle = group.title.charAt(0).toUpperCase() + group.title.slice(1)
+function buildPrompt(protocol: Protocol, repo: Repo): string {
+  const protoFile = `study-areas/${protocol.number}-${protocol.name}.md`
+  const resultsDir = `reports/repo/${protocol.number}-${protocol.name}`
+  const outputFile = `${resultsDir}/${repo.name}.md`
 
   return [
-    `# Study: ${protocol.title} — ${groupTitle}`,
+    `# Study: ${protocol.title} — ${repo.name}`,
     "",
-    `Study all repos in **${groupTitle}** following the attached protocol files.`,
+    `Study ${repo.name} following the attached protocol files.`,
     "",
     "## Files Attached",
     "",
     `1. \`${BASE_PROTOCOL}\` — Base execution instructions (read this first)`,
     `2. \`${protoFile}\` — Protocol-specific study content`,
     "",
-    "## Target Repos",
+    "## Target Repo",
     "",
-    repoList,
+    `1. ${repo.name} (${repo.path})`,
     "",
     "## Instructions",
     "",
     `1. Read \`${BASE_PROTOCOL}\` for execution instructions, template usage, and output structure.`,
     `2. Read \`${protoFile}\` for the specific Steps, Evidence, and Questions.`,
-    `3. **HARD RULES**:`,
-    `   - When studying a repo, NEVER access files outside that repo's directory. BANNED.`,
-    `   - EVERY code mention MUST include \`path/to/file.ts:NN\`. No exceptions.`,
-    `4. For **each** elite repo in the list above:`,
-    `   - Explore the repo's source code following the protocol's Steps and Evidence sections.`,
-    `   - Answer all the protocol's Questions.`,
-    `   - Write a per-repo analysis to \`${resultsDir}/{repo-name}.md\``,
-    `     using \`templates/repo-analysis.md\`.`,
-    `5. Study \`HelloSales/\` against the same protocol and write findings to`,
-    `   \`${resultsDir}/hellosales.md\` using \`templates/repo-analysis.md\`.`,
-    `6. After ALL repos are analyzed (elite + HelloSales):`,
-    `   - Read all per-repo analysis files.`,
-    `   - Create a single combined report at \`${reportFile}\` using \`templates/report.md\`.`,
-    `   - Fill in all template sections including cross-repo comparison, HelloSales findings, and synthesis across all studied systems.`,
+    "3. HARD RULES:",
+    "   - When studying a repo, NEVER access files outside that repo's directory. BANNED.",
+    "   - EVERY code mention MUST include path/to/file.ts:NN. No exceptions.",
+    "4. Explore the repo's source code following the protocol's Steps and Evidence sections.",
+    "   Answer all the protocol's Questions.",
+    `5. Write the analysis to \`${outputFile}\` using \`templates/repo-analysis.md\`.`,
+    "6. Review your analysis before writing. Ensure every claim has file:line evidence.",
     "",
     "## Output",
     "",
-    `- Per-repo files: \`${resultsDir}/{repo-name}.md\` and \`${resultsDir}/hellosales.md\``,
+    `- Analysis: \`${outputFile}\``,
+    "",
+    "Work thoroughly. This is a comparative architecture study, not a surface skim.",
+  ].join("\n")
+}
+
+function buildSynthesisPrompt(protocol: Protocol, allRepos: Repo[]): string {
+  const protoFile = `study-areas/${protocol.number}-${protocol.name}.md`
+  const reportFile = `reports/final/${protocol.number}-${protocol.name}.md`
+  const analysisFiles = allRepos.map(r =>
+    `   - \`reports/repo/${protocol.number}-${protocol.name}/${r.name}.md\``
+  ).join("\n")
+  const reposList = allRepos.map(r => `- **${r.name}**`).join("\n")
+
+  return [
+    `# Synthesis: ${protocol.title}`,
+    "",
+    "Read all per-repo analysis files and create a combined study report.",
+    "",
+    "## Files Attached",
+    "",
+    `1. \`prompts/synthesize.md\` — Synthesis instructions`,
+    `2. \`${protoFile}\` — Study area definition`,
+    "",
+    "## Repos Studied",
+    "",
+    reposList,
+    "",
+    "## Per-Repo Analysis Files to Read",
+    "",
+    analysisFiles,
+    "",
+    "## Instructions",
+    "",
+    `1. Read ALL per-repo analysis files listed above.`,
+    `2. Synthesize findings across all repos into a single combined report.`,
+    `3. Write the report to \`${reportFile}\` using \`templates/report.md\`.`,
+    `4. Fill in all template sections including cross-repo comparison, synthesis, tradeoff matrix,`,
+    `   pattern catalog, decision guide, and evidence index.`,
+    `5. At the end of the report, include a dedicated section: **HelloSales — Improvement Recommendations**.`,
+    `   Based on all the reference system patterns found, propose specific, actionable improvements`,
+    `   for HelloSales organized as: quick wins (low effort, high impact), long-term improvements`,
+    `   (high effort, architectural), and risks (what could go wrong if not addressed).`,
+    `6. Do NOT access any repo source code directly — all evidence is already captured in the analysis files.`,
+    "",
+    "## Output",
+    "",
     `- Combined report: \`${reportFile}\``,
     "",
     "Work thoroughly. This is a comparative architecture study, not a surface skim.",
@@ -209,17 +239,29 @@ const OPENCODE_BIN = findOpenCode()
 function runOpenCode(
   prompt: string,
   protocolFile: string,
-  opts: { model?: string; variant?: string; skipPermissions?: boolean; timeoutMs?: number; primaryModel: string; backupModel: string }
+  opts: {
+    model?: string
+    variant?: string
+    timeoutMs?: number
+    primaryModel: string
+    backupModel: string
+    extraFiles?: string[]
+  }
 ): Promise<{ code: number; rateLimited: boolean; rateLimitModel: string | null }> {
   return new Promise((resolvePromise, reject) => {
     const args: string[] = ["run", prompt]
     args.push("--dir", STUDY_DIR)
     args.push("--file", join(STUDY_DIR, BASE_PROTOCOL))
     args.push("--file", join(STUDY_DIR, protocolFile))
+    if (opts.extraFiles) {
+      for (const f of opts.extraFiles) {
+        args.push("--file", join(STUDY_DIR, f))
+      }
+    }
     args.push("--format", "json")
     if (opts.model) { args.push("--model", opts.model) }
     if (opts.variant) { args.push("--variant", opts.variant) }
-    if (opts.skipPermissions) { args.push("--dangerously-skip-permissions") }
+    args.push("--dangerously-skip-permissions")
 
     let rateLimited = false
     let rateLimitModel: string | null = null
@@ -304,68 +346,97 @@ function saveState(state: RunState): void {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf-8")
 }
 
-function validateCompletedTasks(state: RunState): number {
+function validateCompletedTasks(state: RunState, allRepos: Repo[], allProtocols: Protocol[]): number {
   let fixed = 0
   for (const t of state.tasks) {
     if (t.status !== "completed") continue
-    const reportPath = join(ROOT, "reports", `${t.groupNumber}-${t.groupName}-${t.protocolNumber}-${t.protocolName}.md`)
-    if (!existsSync(reportPath)) {
-      console.log(`  ⚠ Task "${t.protocolTitle} × ${t.groupTitle}" marked completed but report missing — resetting to pending`)
+    const analysisPath = join(ROOT, "reports/repo", `${t.protocolNumber}-${t.protocolName}`, `${t.repoName}.md`)
+    if (!existsSync(analysisPath)) {
+      console.log(`  ⚠ Analysis "${t.protocolTitle} × ${t.repoName}" marked completed but file missing — resetting to pending`)
       t.status = "pending"
       t.attempts = 0
       t.completedAt = null
       t.lastAttemptAt = null
-      t.lastError = "Report file was missing on resume"
+      t.lastError = "Per-repo analysis file missing on resume"
+      fixed++
+    }
+  }
+  for (const s of state.synthesisTasks) {
+    if (s.status !== "completed") continue
+    const reportPath = join(ROOT, "reports/final", `${s.protocolNumber}-${s.protocolName}.md`)
+    if (!existsSync(reportPath)) {
+      console.log(`  ⚠ Synthesis "${s.protocolTitle}" marked completed but report missing — resetting to pending`)
+      s.status = "pending"
+      s.attempts = 0
+      s.completedAt = null
+      s.lastAttemptAt = null
+      s.lastError = "Synthesis report file missing on resume"
       fixed++
     }
   }
   return fixed
 }
 
-function findExistingReports(): Set<string> {
+function findCompletedRepos(allRepos: Repo[], allProtocols: Protocol[]): Set<string> {
   const done = new Set<string>()
-  try {
-    const reportsDir = join(ROOT, "reports")
-    if (existsSync(reportsDir)) {
-      for (const f of readdirSync(reportsDir)) {
-        if (!f.endsWith(".md")) continue
-        // report files follow: {group-number}-{group-name}-{protocol-number}-{protocol-name}.md
-        done.add(f)
-      }
+  for (const r of allRepos) {
+    for (const p of allProtocols) {
+      const analysisPath = join(ROOT, "reports/repo", `${p.number}-${p.name}`, `${r.name}.md`)
+      if (existsSync(analysisPath)) done.add(`${r.name}-${p.number}`)
     }
-  } catch { /* ignore */ }
+  }
   return done
 }
 
-function reportFileFor(group: Group, protocol: Protocol): string {
-  return `${group.number}-${group.name}-${protocol.number}-${protocol.name}.md`
-}
-
-function createInitialState(tasks: { protocol: Protocol; group: Group }[], batchSize: number): RunState {
-  const existingReports = findExistingReports()
+function createInitialState(allRepos: Repo[], allProtocols: Protocol[], batchSize: number): RunState {
+  const completed = findCompletedRepos(allRepos, allProtocols)
   let foundCount = 0
-  const taskStates: TaskState[] = tasks.map(t => {
-    const reportFile = reportFileFor(t.group, t.protocol)
-    const isDone = existingReports.has(reportFile)
-    if (isDone) foundCount++
-    return {
-      protocolNumber: t.protocol.number,
-      protocolName: t.protocol.name,
-      protocolTitle: t.protocol.title,
-      groupNumber: t.group.number,
-      groupName: t.group.name,
-      groupTitle: t.group.title,
-      status: isDone ? "completed" : "pending",
-      attempts: isDone ? 1 : 0,
-      lastError: null,
-      lastAttemptAt: isDone ? new Date().toISOString() : null,
-      nextRetryAt: null,
-      completedAt: isDone ? new Date().toISOString() : null,
+  const taskStates: TaskState[] = []
+  for (const p of allProtocols) {
+    for (const r of allRepos) {
+      const key = `${r.name}-${p.number}`
+      const isDone = completed.has(key)
+      if (isDone) foundCount++
+      taskStates.push({
+        protocolNumber: p.number,
+        protocolName: p.name,
+        protocolTitle: p.title,
+        repoName: r.name,
+        status: isDone ? "completed" : "pending",
+        attempts: isDone ? 1 : 0,
+        lastError: null,
+        lastAttemptAt: isDone ? new Date().toISOString() : null,
+        nextRetryAt: null,
+        completedAt: isDone ? new Date().toISOString() : null,
+      })
     }
-  })
+  }
 
   if (foundCount > 0) {
-    console.log(`  Found ${foundCount} existing report(s) — marking as completed`)
+    console.log(`  Found ${foundCount} existing analysis file(s) — marking as completed`)
+  }
+
+  // Create synthesis tasks for protocols where ALL repos are done
+  const synthesisTasks: SynthesisState[] = []
+  for (const p of allProtocols) {
+    const allDone = allRepos.every(r => {
+      const task = taskStates.find(t => t.protocolNumber === p.number && t.repoName === r.name)
+      return task && task.status === "completed"
+    })
+    if (allDone && allRepos.length > 0) {
+      synthesisTasks.push({
+        protocolNumber: p.number,
+        protocolName: p.name,
+        protocolTitle: p.title,
+        status: "completed",
+        attempts: 1,
+        lastError: null,
+        lastAttemptAt: new Date().toISOString(),
+        nextRetryAt: null,
+        completedAt: new Date().toISOString(),
+      })
+      console.log(`  Synthesis for ${p.title} already complete — report found`)
+    }
   }
 
   return {
@@ -374,6 +445,7 @@ function createInitialState(tasks: { protocol: Protocol; group: Group }[], batch
     updatedAt: new Date().toISOString(),
     batchSize,
     tasks: taskStates,
+    synthesisTasks,
     isComplete: false,
   }
 }
@@ -404,19 +476,6 @@ function formatDuration(ms: number): string {
 
 // ─── Status Display ──────────────────────────────────────────────────────────
 
-function printStatus(tasks: TaskState[]): void {
-  const total = tasks.length
-  const completed = tasks.filter(t => t.status === "completed").length
-  const running = tasks.filter(t => t.status === "running").length
-  const failed = tasks.filter(t => t.status === "failed").length
-  const pending = tasks.filter(t => t.status === "pending").length
-  const pct = total > 0 ? (completed / total * 100).toFixed(1) : "0.0"
-
-  console.log(`\nProgress: ${completed}/${total} (${pct}%)`)
-  console.log(`  Completed: ${completed}  Running: ${running}  Failed: ${failed}  Pending: ${pending}`)
-  console.log("")
-}
-
 function cmdStatus(): void {
   const state = loadState()
   if (!state) {
@@ -424,35 +483,58 @@ function cmdStatus(): void {
     return
   }
 
-  const total = state.tasks.length
-  const completed = state.tasks.filter(t => t.status === "completed").length
-  const running = state.tasks.filter(t => t.status === "running").length
-  const failed = state.tasks.filter(t => t.status === "failed").length
-  const pending = state.tasks.filter(t => t.status === "pending").length
-  const pct = total > 0 ? (completed / total * 100).toFixed(1) : "0.0"
+  const analysisTotal = state.tasks.length
+  const analysisCompleted = state.tasks.filter(t => t.status === "completed").length
+  const analysisRunning = state.tasks.filter(t => t.status === "running").length
+  const analysisFailed = state.tasks.filter(t => t.status === "failed").length
+  const analysisPending = state.tasks.filter(t => t.status === "pending").length
+  const analysisPct = analysisTotal > 0 ? (analysisCompleted / analysisTotal * 100).toFixed(1) : "0.0"
+
+  const synthTotal = state.synthesisTasks.length
+  const synthCompleted = state.synthesisTasks.filter(s => s.status === "completed").length
+  const synthRunning = state.synthesisTasks.filter(s => s.status === "running").length
+  const synthFailed = state.synthesisTasks.filter(s => s.status === "failed").length
+  const synthPending = state.synthesisTasks.filter(s => s.status === "pending").length
+
+  const grandTotal = analysisTotal + synthTotal
+  const grandCompleted = analysisCompleted + synthCompleted
 
   console.log(`\nRun started: ${state.createdAt}`)
   console.log(`Last updated: ${state.updatedAt}`)
   console.log(`Batch size: ${state.batchSize}`)
   console.log(`Status: ${state.isComplete ? "✓ Complete" : "▶ In progress"}`)
-  console.log(`\nProgress: ${completed}/${total} (${pct}%)`)
-  console.log(`  Completed: ${completed}`)
-  console.log(`  Running:   ${running}`)
-  console.log(`  Failed:    ${failed}`)
-  console.log(`  Pending:   ${pending}`)
+  console.log(`\nAnalyses: ${analysisCompleted}/${analysisTotal} (${analysisPct}%)`)
+  console.log(`  Completed: ${analysisCompleted}  Running: ${analysisRunning}  Failed: ${analysisFailed}  Pending: ${analysisPending}`)
+  if (synthTotal > 0) {
+    console.log(`Synthesis: ${synthCompleted}/${synthTotal}  Running: ${synthRunning}  Failed: ${synthFailed}  Pending: ${synthPending}`)
+  }
+  console.log(`Total: ${grandCompleted}/${grandTotal}`)
   console.log("")
 
-  if (failed > 0 || pending > 0) {
-    console.log("Remaining Tasks:")
+  if (analysisFailed > 0 || analysisPending > 0 || synthFailed > 0 || synthPending > 0) {
+    console.log("Remaining Analysis Tasks:")
     for (const t of state.tasks) {
       if (t.status === "completed") continue
-      const label = `${t.protocolTitle} × ${t.groupTitle}`
+      const label = `${t.protocolTitle} × ${t.repoName}`
       if (t.status === "running") {
         console.log(`  ▶ ${label} (attempt ${t.attempts})`)
       } else if (t.status === "failed") {
         const retryStr = t.nextRetryAt ? `, retry at ${t.nextRetryAt}` : ""
         console.log(`  ✗ ${label} (attempt ${t.attempts}${retryStr})`)
         if (t.lastError) console.log(`    Error: ${t.lastError}`)
+      } else {
+        console.log(`  ○ ${label}`)
+      }
+    }
+    for (const s of state.synthesisTasks) {
+      if (s.status === "completed") continue
+      const label = `Synthesis: ${s.protocolTitle}`
+      if (s.status === "running") {
+        console.log(`  ▶ ${label} (attempt ${s.attempts})`)
+      } else if (s.status === "failed") {
+        const retryStr = s.nextRetryAt ? `, retry at ${s.nextRetryAt}` : ""
+        console.log(`  ✗ ${label} (attempt ${s.attempts}${retryStr})`)
+        if (s.lastError) console.log(`    Error: ${s.lastError}`)
       } else {
         console.log(`  ○ ${label}`)
       }
@@ -464,13 +546,12 @@ function cmdStatus(): void {
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 function cmdList() {
-  const groups = discoverGroups()
+  const repos = discoverRepos()
   const protocols = discoverProtocols()
 
-  console.log("\nAvailable Groups:\n")
-  for (const g of groups) {
-    const repos = g.repos.map(r => r.name).join(", ")
-    console.log(`  ${g.number}-${g.name} (${g.repos.length} repos: ${repos})`)
+  console.log("\nAvailable Repos:\n")
+  for (const r of repos) {
+    console.log(`  ${r.name}`)
   }
 
   console.log("\nAvailable Protocols:\n")
@@ -479,26 +560,27 @@ function cmdList() {
   }
 
   console.log("\nUsage (from ai-agent-examples/):\n")
-  console.log("  bun run cli/src/index.ts run <protocol-ref> <group-ref> [options]")
+  console.log("  bun run cli/src/index.ts list")
+  console.log("  bun run cli/src/index.ts run <repo-name> <protocol-ref> [options]")
   console.log("  bun run cli/src/index.ts run-all [options]")
   console.log("  bun run cli/src/index.ts run-loop [options]")
-  console.log("  bun run cli/src/index.ts status")
-  console.log("  bun run cli/src/index.ts list\n")
+  console.log("  bun run cli/src/index.ts synthesize <protocol-ref>")
+  console.log("  bun run cli/src/index.ts synthesize-all")
+  console.log("  bun run cli/src/index.ts status\n")
 }
 
-async function cmdRun(protocolRef: string, groupRef: string, opts: { model?: string; variant?: string; dryRun?: boolean; skipPermissions?: boolean; timeoutMs?: number; primaryModel: string; backupModel: string }) {
-  const groups = discoverGroups()
-  const protocols = discoverProtocols()
-  const protocol = resolveProtocol(protocolRef, protocols)
-  const group = resolveGroup(groupRef, groups)
+async function cmdRun(repoRef: string, protocolRef: string, opts: { model?: string; variant?: string; dryRun?: boolean; timeoutMs?: number; primaryModel: string; backupModel: string }) {
+  const allRepos = discoverRepos()
+  const allProtocols = discoverProtocols()
+  const protocol = resolveProtocol(protocolRef, allProtocols)
+  const repo = resolveRepo(repoRef, allRepos)
 
-  const prompt = buildPrompt(protocol, group)
-  const protoRel = `protocols/${protocol.number}-${protocol.name}.md`
-  const resultsDir = join(ROOT, "results", `${protocol.number}-${protocol.name}`)
-  const reportFile = `${group.number}-${group.name}-${protocol.number}-${protocol.name}.md`
+  const prompt = buildPrompt(protocol, repo)
+  const protoRel = `study-areas/${protocol.number}-${protocol.name}.md`
+  const resultsDir = join(ROOT, "reports/repo", `${protocol.number}-${protocol.name}`)
 
   if (opts.dryRun) {
-    console.log(`\n=== DRY RUN: ${protocol.title} → ${group.title} ===\n`)
+    console.log(`\n=== DRY RUN: ${protocol.title} → ${repo.name} ===\n`)
     console.log(prompt)
     const modelFlag = opts.model ? ` --model ${opts.model}` : ""
     const variantFlag = opts.variant ? ` --variant ${opts.variant}` : ""
@@ -508,18 +590,16 @@ async function cmdRun(protocolRef: string, groupRef: string, opts: { model?: str
   }
 
   mkdirSync(resultsDir, { recursive: true })
-  mkdirSync(join(ROOT, "reports"), { recursive: true })
 
-  console.log(`\n▶ Studying ${protocol.title} against ${group.name}...\n`)
+  console.log(`\n▶ Studying ${protocol.title} on ${repo.name}...\n`)
 
-  const { code } = await runOpenCode(prompt, protoRel, opts)
+  const { code } = await runOpenCode(prompt, protoRel, { model: opts.model, variant: opts.variant, timeoutMs: opts.timeoutMs, primaryModel: opts.primaryModel, backupModel: opts.backupModel })
 
   if (code === 0) {
-    console.log(`\n✓ Done: ${protocol.title} → ${group.title}`)
-    console.log(`  Results: ${resultsDir}/{repo}.md`)
-    console.log(`  Report:  reports/${reportFile}`)
+    console.log(`\n✓ Analysis done: ${protocol.title} → ${repo.name}`)
+    console.log(`  File: ${resultsDir}/${repo.name}.md`)
   } else {
-    console.error(`\n✗ Failed (exit code ${code}): ${protocol.title} → ${group.title}`)
+    console.error(`\n✗ Failed (exit code ${code}): ${protocol.title} → ${repo.name}`)
     process.exit(code)
   }
 }
@@ -528,59 +608,79 @@ async function cmdRunAll(opts: {
   model?: string
   variant?: string
   dryRun?: boolean
-  skipPermissions?: boolean
   parallel?: number
   timeoutMs?: number
   protocolFilter?: string[]
-  groupFilter?: string[]
+  repoFilter?: string[]
   primaryModel: string
   backupModel: string
 }) {
-  const groups = discoverGroups().filter(g => !opts.groupFilter || opts.groupFilter.includes(g.number))
-  const protocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
+  const allRepos = discoverRepos().filter(r => !opts.repoFilter || opts.repoFilter.includes(r.name))
+  const allProtocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
 
-  if (protocols.length === 0 || groups.length === 0) {
-    console.error("No matching protocols or groups found")
+  if (allProtocols.length === 0 || allRepos.length === 0) {
+    console.error("No matching protocols or repos found")
     process.exit(1)
   }
 
-  const tasks: { protocol: Protocol; group: Group }[] = []
-  for (const p of protocols) {
-    for (const g of groups) {
-      tasks.push({ protocol: p, group: g })
-    }
-  }
-
   const concurrency = opts.parallel ?? CONFIG.defaultParallel
-  console.log(`\n▶ Running ${tasks.length} studies (${protocols.length} protocols × ${groups.length} groups)`)
+  const total = allProtocols.length * allRepos.length
+  console.log(`\n▶ Running ${total} analyses (${allProtocols.length} protocols × ${allRepos.length} repos)`)
   console.log(`  Parallel: ${concurrency}\n`)
 
-  mkdirSync(join(ROOT, "reports"), { recursive: true })
-
   await runWithConcurrency(
-    tasks.map(({ protocol, group }) => async () => {
-      const prompt = buildPrompt(protocol, group)
-      const protoRel = `protocols/${protocol.number}-${protocol.name}.md`
-      const resultsDir = join(ROOT, "results", `${protocol.number}-${protocol.name}`)
+    allProtocols.flatMap(protocol =>
+      allRepos.map(repo => async () => {
+        const prompt = buildPrompt(protocol, repo)
+        const protoRel = `study-areas/${protocol.number}-${protocol.name}.md`
+        const resultsDir = join(ROOT, "reports/repo", `${protocol.number}-${protocol.name}`)
+
+        if (opts.dryRun) {
+          console.log(`[DRY RUN] ${protocol.title} → ${repo.name}`)
+          return
+        }
+
+        mkdirSync(resultsDir, { recursive: true })
+
+        console.log(`[START] ${protocol.title} → ${repo.name}`)
+        const { code } = await runOpenCode(prompt, protoRel, { model: opts.model, variant: opts.variant, timeoutMs: opts.timeoutMs, primaryModel: opts.primaryModel, backupModel: opts.backupModel })
+        if (code === 0) {
+          console.log(`[DONE]  ${protocol.title} → ${repo.name}`)
+        } else {
+          console.error(`[FAIL]  ${protocol.title} → ${repo.name} (exit ${code})`)
+        }
+      })
+    ),
+    concurrency,
+  )
+
+  console.log("\n✓ All per-repo analyses completed")
+
+  // Run synthesis for each protocol
+  console.log("\n▶ Running synthesis for each protocol...\n")
+  await runWithConcurrency(
+    allProtocols.map(protocol => async () => {
+      const prompt = buildSynthesisPrompt(protocol, allRepos)
+      const protoRel = `study-areas/${protocol.number}-${protocol.name}.md`
+      mkdirSync(join(ROOT, "reports/final"), { recursive: true })
 
       if (opts.dryRun) {
-        console.log(`[DRY RUN] ${protocol.title} → ${group.title}`)
+        console.log(`[DRY RUN] Synthesis: ${protocol.title}`)
         return
       }
 
-      mkdirSync(resultsDir, { recursive: true })
-
-      console.log(`[START] ${protocol.title} → ${group.name}`)
-      const { code } = await runOpenCode(prompt, protoRel, opts)
+      console.log(`[SYNTHESIS] ${protocol.title}`)
+      const { code } = await runOpenCode(prompt, protoRel, { model: opts.model, variant: opts.variant, timeoutMs: opts.timeoutMs, primaryModel: opts.primaryModel, backupModel: opts.backupModel })
       if (code === 0) {
-        console.log(`[DONE]  ${protocol.title} → ${group.name}`)
+        console.log(`[DONE]  Synthesis: ${protocol.title}`)
       } else {
-        console.error(`[FAIL]  ${protocol.title} → ${group.name} (exit ${code})`)
+        console.error(`[FAIL]  Synthesis: ${protocol.title} (exit ${code})`)
       }
     }),
     concurrency,
   )
 
+  generateSummary()
   console.log("\n✓ All studies completed")
 }
 
@@ -588,75 +688,64 @@ async function cmdRunLoop(opts: {
   model?: string
   variant?: string
   dryRun?: boolean
-  skipPermissions?: boolean
   batchSize: number
   timeoutMs?: number
   protocolFilter?: string[]
-  groupFilter?: string[]
+  repoFilter?: string[]
   primaryModel: string
   backupModel: string
 }) {
   // Dry-run: just list what would be done
   if (opts.dryRun) {
-    const groups = discoverGroups().filter(g => !opts.groupFilter || opts.groupFilter.includes(g.number))
-    const protocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
-    if (protocols.length === 0 || groups.length === 0) {
-      console.error("No matching protocols or groups found")
+    const allRepos = discoverRepos().filter(r => !opts.repoFilter || opts.repoFilter.includes(r.name))
+    const allProtocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
+    if (allProtocols.length === 0 || allRepos.length === 0) {
+      console.error("No matching protocols or repos found")
       process.exit(1)
     }
-    console.log(`\n[DRY RUN] Would run ${protocols.length} protocols × ${groups.length} groups (batch size: ${opts.batchSize}):\n`)
-
-    const existingReports = findExistingReports()
     const existing = loadState()
+    const total = allProtocols.length * allRepos.length
+    console.log(`\n[DRY RUN] Would run ${total} analyses + ${allProtocols.length} synthesis tasks (batch size: ${opts.batchSize}):\n`)
 
-    for (const g of groups) {
-      for (const p of protocols) {
-        const reportDone = existingReports.has(reportFileFor(g, p))
+    for (const p of allProtocols) {
+      for (const r of allRepos) {
+        const analysisPath = join(ROOT, "reports/repo", `${p.number}-${p.name}`, `${r.name}.md`)
+        const exists = existsSync(analysisPath)
         const stateDone = existing?.tasks.find(
-          t => t.protocolNumber === p.number && t.groupNumber === g.number && t.status === "completed"
+          t => t.protocolNumber === p.number && t.repoName === r.name && t.status === "completed"
         )
-        const stateRunning = existing?.tasks.find(
-          t => t.protocolNumber === p.number && t.groupNumber === g.number && t.status === "running"
-        )
-        const tag = reportDone || stateDone ? " [already done]" : stateRunning ? " [resuming]" : ""
-        console.log(`  ${p.title} × ${g.title}${tag}`)
+        const tag = exists || stateDone ? " [done]" : ""
+        console.log(`  ${p.title} × ${r.name}${tag}`)
       }
     }
     console.log("")
     return
   }
 
+  // Cache resolved lookups
+  const allRepos = discoverRepos().filter(r => !opts.repoFilter || opts.repoFilter.includes(r.name))
+  const allProtocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
+
   // Load or create state
   let state = loadState()
   if (state) {
     console.log(`\n▶ Resuming existing run from ${state.createdAt}`)
-    const fixed = validateCompletedTasks(state)
+    const fixed = validateCompletedTasks(state, allRepos, allProtocols)
     if (fixed > 0) {
       saveState(state)
-      console.log(`  Fixed ${fixed} task(s) with missing reports`)
+      console.log(`  Fixed ${fixed} task(s) with missing files`)
     }
-    printStatus(state.tasks)
+    cmdStatus()
   } else {
-    const groups = discoverGroups().filter(g => !opts.groupFilter || opts.groupFilter.includes(g.number))
-    const protocols = discoverProtocols().filter(p => !opts.protocolFilter || opts.protocolFilter.includes(p.number))
-    if (protocols.length === 0 || groups.length === 0) {
-      console.error("No matching protocols or groups found")
+    if (allProtocols.length === 0 || allRepos.length === 0) {
+      console.error("No matching protocols or repos found")
       process.exit(1)
     }
-    const taskList: { protocol: Protocol; group: Group }[] = []
-    for (const p of protocols) {
-      for (const g of groups) {
-        taskList.push({ protocol: p, group: g })
-      }
-    }
-    state = createInitialState(taskList, opts.batchSize)
+    state = createInitialState(allRepos, allProtocols, opts.batchSize)
     saveState(state)
-    console.log(`\n▶ Starting run: ${taskList.length} tasks, batch size ${opts.batchSize}`)
+    const total = allProtocols.length * allRepos.length
+    console.log(`\n▶ Starting run: ${total} analyses + synthesis per protocol, batch size ${opts.batchSize}`)
   }
-
-  // Cache resolved lookups
-  const allGroups = discoverGroups()
-  const allProtocols = discoverProtocols()
 
   let lastStatusTime = 0
 
@@ -673,70 +762,138 @@ async function cmdRunLoop(opts: {
   while (!state.isComplete) {
     const now = Date.now()
 
-    // Classify all tasks
-    let completedCount = 0
-    const runnable: TaskState[] = []
+    // Check if any protocols are ready for synthesis (all repos done)
+    for (const p of allProtocols) {
+      const allReposDone = allRepos.every(r =>
+        state.tasks.find(t => t.protocolNumber === p.number && t.repoName === r.name)?.status === "completed"
+      )
+      const synthExists = state.synthesisTasks.find(s => s.protocolNumber === p.number)
+      if (allReposDone && !synthExists) {
+        state.synthesisTasks.push({
+          protocolNumber: p.number,
+          protocolName: p.name,
+          protocolTitle: p.title,
+          status: "pending",
+          attempts: 0,
+          lastError: null,
+          lastAttemptAt: null,
+          nextRetryAt: null,
+          completedAt: null,
+        })
+        console.log(`  ➜ Synthesis queued for ${p.title}`)
+        saveState(state)
+      }
+    }
+
+    // Classify all analysis tasks
+    let analysisCompletedCount = 0
+    const runnableAnalysis: TaskState[] = []
     let earliestRetry = Infinity
 
     for (const t of state.tasks) {
       switch (t.status) {
         case "completed":
-          completedCount++
+          analysisCompletedCount++
           break
         case "pending":
-          runnable.push(t)
+          runnableAnalysis.push(t)
           break
         case "failed":
           if (t.nextRetryAt) {
             const retryTime = new Date(t.nextRetryAt).getTime()
             if (now >= retryTime) {
               t.status = "pending"
-              runnable.push(t)
+              runnableAnalysis.push(t)
             } else {
               earliestRetry = Math.min(earliestRetry, retryTime)
             }
           } else {
             t.status = "pending"
-            runnable.push(t)
+            runnableAnalysis.push(t)
           }
           break
         case "running":
-          // Shouldn't have running tasks on a fresh loop iteration
           t.status = "pending"
-          runnable.push(t)
+          runnableAnalysis.push(t)
           break
       }
     }
 
+    // Classify all synthesis tasks
+    let synthesisCompletedCount = 0
+    const runnableSynthesis: SynthesisState[] = []
+
+    for (const s of state.synthesisTasks) {
+      switch (s.status) {
+        case "completed":
+          synthesisCompletedCount++
+          break
+        case "pending":
+          runnableSynthesis.push(s)
+          break
+        case "failed":
+          if (s.nextRetryAt) {
+            const retryTime = new Date(s.nextRetryAt).getTime()
+            if (now >= retryTime) {
+              s.status = "pending"
+              runnableSynthesis.push(s)
+            } else {
+              earliestRetry = Math.min(earliestRetry, retryTime)
+            }
+          } else {
+            s.status = "pending"
+            runnableSynthesis.push(s)
+          }
+          break
+        case "running":
+          s.status = "pending"
+          runnableSynthesis.push(s)
+          break
+      }
+    }
+
+    const totalTasks = state.tasks.length + state.synthesisTasks.length
+    const completedCount = analysisCompletedCount + synthesisCompletedCount
+
     // All done?
-    if (completedCount === state.tasks.length) {
+    if (completedCount === totalTasks) {
       state.isComplete = true
       saveState(state)
+      generateSummary()
       console.log("\n✓ All tasks completed!")
-      printStatus(state.tasks)
+      cmdStatus()
       break
     }
 
-    // Nothing runnable now — all in backoff
-    if (runnable.length === 0) {
+    // Nothing runnable now
+    if (runnableAnalysis.length === 0 && runnableSynthesis.length === 0) {
       if (earliestRetry < Infinity) {
         const wait = Math.min(earliestRetry - Date.now(), BACKOFF_DELAYS[BACKOFF_DELAYS.length - 1])
         if (wait > 0) {
-          printStatus(state.tasks)
+          cmdStatus()
           console.log(`⏳ All remaining tasks in backoff. Sleeping ${formatDuration(wait)} until next retry...`)
           console.log(`   (Next retry at: ${new Date(earliestRetry).toISOString()})`)
           await sleep(wait)
           continue
         }
       }
-      // Safety: if we get here, something is wrong — wait and retry
+      if (analysisCompletedCount === state.tasks.length && runnableSynthesis.length === 0) {
+        await sleep(5_000)
+        continue
+      }
       console.log("⚠ Unexpected state — no runnable tasks but not complete. Waiting 30s...")
       await sleep(30_000)
       continue
     }
 
-    // Take a batch
-    const batch = runnable.slice(0, opts.batchSize)
+  // Interleave analysis and synthesis tasks up to batch size,
+    // ensuring synthesis tasks get a slot every batch so they don't starve
+    const runnable: (TaskState | SynthesisState)[] = []
+    const synthCount = Math.min(runnableSynthesis.length, Math.ceil(opts.batchSize / 2))
+    runnable.push(...runnableSynthesis.slice(0, synthCount))
+    const analysisSlots = opts.batchSize - runnable.length
+    runnable.push(...runnableAnalysis.slice(0, analysisSlots))
+    const batch = runnable
     for (const t of batch) {
       t.status = "running"
       t.lastAttemptAt = new Date().toISOString()
@@ -744,96 +901,213 @@ async function cmdRunLoop(opts: {
     }
     saveState(state)
 
-    // Print status periodically (not more than once every 10s)
+    // Print status periodically
     if (Date.now() - lastStatusTime > 10_000) {
-      printStatus(state.tasks)
+      cmdStatus()
       lastStatusTime = Date.now()
     }
 
     // Run batch concurrently
     await Promise.all(batch.map(async (task) => {
-      const prot = allProtocols.find(p => p.number === task.protocolNumber)
-      const grp = allGroups.find(g => g.number === task.groupNumber)
-      if (!prot || !grp) {
-        task.status = "failed"
-        task.lastError = "Protocol or group directory not found on filesystem"
-        const delay = getBackoffDelay(task.attempts)
-        task.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
-        saveState(state!)
-        console.log(`  ✗ [${task.protocolTitle} × ${task.groupTitle}] missing on disk, retry in ${formatDuration(delay)}`)
-        return
-      }
+      const isSynthesis = "protocolName" in task && !("repoName" in task)
+      const synthTask = isSynthesis ? task as unknown as SynthesisState : null
+      const analysisTask = !isSynthesis ? task as TaskState : null
 
-      const prompt = buildPrompt(prot, grp)
-      const protoRel = `protocols/${task.protocolNumber}-${task.protocolName}.md`
-      const resultsDir = join(ROOT, "results", `${task.protocolNumber}-${task.protocolName}`)
-      mkdirSync(resultsDir, { recursive: true })
-      mkdirSync(join(ROOT, "reports"), { recursive: true })
+      if (analysisTask) {
+        const prot = allProtocols.find(p => p.number === analysisTask.protocolNumber)
+        const repo = allRepos.find(r => r.name === analysisTask.repoName)
+        if (!prot || !repo) {
+          analysisTask.status = "failed"
+          analysisTask.lastError = "Protocol or repo not found on filesystem"
+          const delay = getBackoffDelay(analysisTask.attempts)
+          analysisTask.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
+          saveState(state!)
+          console.log(`  ✗ [${analysisTask.protocolTitle} × ${analysisTask.repoName}] missing on disk, retry in ${formatDuration(delay)}`)
+          return
+        }
 
-      console.log(`  ▶ [${task.protocolTitle} × ${task.groupTitle}] attempt ${task.attempts}`)
+        const prompt = buildPrompt(prot, repo)
+        const protoRel = `study-areas/${analysisTask.protocolNumber}-${analysisTask.protocolName}.md`
+        const resultsDir = join(ROOT, "reports/repo", `${analysisTask.protocolNumber}-${analysisTask.protocolName}`)
+        mkdirSync(resultsDir, { recursive: true })
 
-      let code: number
-      let rateLimited = false
-      let usedBackup = false
+        console.log(`  ▶ [${analysisTask.protocolTitle} × ${analysisTask.repoName}] attempt ${analysisTask.attempts}`)
 
-      try {
-        const result = await runOpenCode(prompt, protoRel, {
-          model: opts.model,
-          variant: opts.variant,
-          skipPermissions: opts.skipPermissions,
-          timeoutMs: opts.timeoutMs,
-          primaryModel: opts.primaryModel,
-          backupModel: opts.backupModel,
-        })
-        code = result.code
-        rateLimited = result.rateLimited
+        let code: number
+        let rateLimited = false
+        let usedBackup = false
 
-        if (rateLimited && code === 0) {
-          console.log(`  ⚠ Rate limit detected on ${result.rateLimitModel}, retrying with backup model...`)
-          usedBackup = true
-          const backupResult = await runOpenCode(prompt, protoRel, {
-            model: opts.backupModel,
+        try {
+          const result = await runOpenCode(prompt, protoRel, {
+            model: opts.model,
             variant: opts.variant,
-            skipPermissions: opts.skipPermissions,
             timeoutMs: opts.timeoutMs,
             primaryModel: opts.primaryModel,
             backupModel: opts.backupModel,
+            extraFiles: [],
           })
-          code = backupResult.code
-          rateLimited = backupResult.rateLimited
+          code = result.code
+          rateLimited = result.rateLimited
+
+          if (rateLimited && code === 0) {
+            console.log(`  ⚠ Rate limit detected on ${result.rateLimitModel}, retrying with backup model...`)
+            usedBackup = true
+            const backupResult = await runOpenCode(prompt, protoRel, {
+              model: opts.backupModel,
+              variant: opts.variant,
+              timeoutMs: opts.timeoutMs,
+              primaryModel: opts.primaryModel,
+              backupModel: opts.backupModel,
+              extraFiles: [],
+            })
+            code = backupResult.code
+            rateLimited = backupResult.rateLimited
+          }
+        } catch (err) {
+          code = 1
+          analysisTask.lastError = err instanceof Error ? err.message : String(err)
         }
-      } catch (err) {
-        code = 1
-        task.lastError = err instanceof Error ? err.message : String(err)
-      }
 
-      if (usedBackup) {
-        task.lastError = (task.lastError ? task.lastError + "; " : "") + `Rate limit triggered primary model switch to backup`
-      }
+        if (usedBackup) {
+          analysisTask.lastError = (analysisTask.lastError ? analysisTask.lastError + "; " : "") + `Rate limit triggered primary model switch to backup`
+        }
 
-      if (code === 0) {
-        const reportPath = join(ROOT, "reports", `${task.groupNumber}-${task.groupName}-${task.protocolNumber}-${task.protocolName}.md`)
-        if (!existsSync(reportPath)) {
-          task.status = "failed"
-          const delay = getBackoffDelay(task.attempts)
-          task.lastError = "Study completed (exit 0) but combined report was not generated"
-          task.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
-          console.log(`  ⚠ [${task.protocolTitle} × ${task.groupTitle}] exit 0 but report missing, retry in ${formatDuration(delay)}`)
+        if (code === 0) {
+          analysisTask.status = "completed"
+          analysisTask.completedAt = new Date().toISOString()
+          console.log(`  ✓ [${analysisTask.protocolTitle} × ${analysisTask.repoName}] analysis written`)
         } else {
-          task.status = "completed"
-          task.completedAt = new Date().toISOString()
-          console.log(`  ✓ [${task.protocolTitle} × ${task.groupTitle}] completed`)
+          analysisTask.status = "failed"
+          const delay = getBackoffDelay(analysisTask.attempts)
+          analysisTask.lastError = analysisTask.lastError || `Exit code ${code}`
+          analysisTask.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
+          console.log(`  ✗ [${analysisTask.protocolTitle} × ${analysisTask.repoName}] failed (attempt ${analysisTask.attempts}), next retry in ${formatDuration(delay)}`)
         }
-      } else {
-        task.status = "failed"
-        const delay = getBackoffDelay(task.attempts)
-        task.lastError = task.lastError || `Exit code ${code}`
-        task.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
-        console.log(`  ✗ [${task.protocolTitle} × ${task.groupTitle}] failed (attempt ${task.attempts}), next retry in ${formatDuration(delay)}`)
+      } else if (synthTask) {
+        const prot = allProtocols.find(p => p.number === synthTask.protocolNumber)
+        if (!prot) {
+          synthTask.status = "failed"
+          synthTask.lastError = "Protocol not found on filesystem"
+          const delay = getBackoffDelay(synthTask.attempts)
+          synthTask.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
+          saveState(state!)
+          console.log(`  ✗ Synthesis [${synthTask.protocolTitle}] missing on disk, retry in ${formatDuration(delay)}`)
+          return
+        }
+
+        const prompt = buildSynthesisPrompt(prot, allRepos)
+        const protoRel = `study-areas/${synthTask.protocolNumber}-${synthTask.protocolName}.md`
+        const synthFile = `prompts/synthesize.md`
+        mkdirSync(join(ROOT, "reports/final"), { recursive: true })
+
+        console.log(`  ▶ Synthesis [${synthTask.protocolTitle}] attempt ${synthTask.attempts}`)
+
+        let code: number
+        let rateLimited = false
+        let usedBackup = false
+
+        try {
+          const result = await runOpenCode(prompt, protoRel, {
+            model: opts.model,
+            variant: opts.variant,
+            timeoutMs: opts.timeoutMs,
+            primaryModel: opts.primaryModel,
+            backupModel: opts.backupModel,
+            extraFiles: [synthFile],
+          })
+          code = result.code
+          rateLimited = result.rateLimited
+
+          if (rateLimited && code === 0) {
+            console.log(`  ⚠ Rate limit detected on ${result.rateLimitModel}, retrying with backup model...`)
+            usedBackup = true
+            const backupResult = await runOpenCode(prompt, protoRel, {
+              model: opts.backupModel,
+              variant: opts.variant,
+              timeoutMs: opts.timeoutMs,
+              primaryModel: opts.primaryModel,
+              backupModel: opts.backupModel,
+              extraFiles: [synthFile],
+            })
+            code = backupResult.code
+            rateLimited = backupResult.rateLimited
+          }
+        } catch (err) {
+          code = 1
+          synthTask.lastError = err instanceof Error ? err.message : String(err)
+        }
+
+        if (usedBackup) {
+          synthTask.lastError = (synthTask.lastError ? synthTask.lastError + "; " : "") + `Rate limit triggered primary model switch to backup`
+        }
+
+        if (code === 0) {
+          const reportPath = join(ROOT, "reports/final", `${synthTask.protocolNumber}-${synthTask.protocolName}.md`)
+          if (!existsSync(reportPath)) {
+            synthTask.status = "failed"
+            const delay = getBackoffDelay(synthTask.attempts)
+            synthTask.lastError = "Synthesis completed (exit 0) but report file was not generated"
+            synthTask.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
+            console.log(`  ⚠ Synthesis [${synthTask.protocolTitle}] exit 0 but report missing, retry in ${formatDuration(delay)}`)
+          } else {
+            synthTask.status = "completed"
+            synthTask.completedAt = new Date().toISOString()
+            console.log(`  ✓ Synthesis [${synthTask.protocolTitle}] report written`)
+          }
+        } else {
+          synthTask.status = "failed"
+          const delay = getBackoffDelay(synthTask.attempts)
+          synthTask.lastError = synthTask.lastError || `Exit code ${code}`
+          synthTask.nextRetryAt = delay > 0 ? new Date(Date.now() + delay).toISOString() : null
+          console.log(`  ✗ Synthesis [${synthTask.protocolTitle}] failed (attempt ${synthTask.attempts}), next retry in ${formatDuration(delay)}`)
+        }
       }
       saveState(state!)
     }))
   }
+}
+
+// ─── Summary CSV ──────────────────────────────────────────────────────────────
+
+const SUMMARY_FILE = join(ROOT, "summary.csv")
+
+function extractScore(filePath: string): number | null {
+  try {
+    const content = readFileSync(filePath, "utf-8")
+    const match = content.match(/\*\*(\d+(?:\.\d+)?)\s*\/\s*10\s*\*\*/)
+    return match ? parseFloat(match[1]) : null
+  } catch {
+    return null
+  }
+}
+
+function generateSummary(): void {
+  const repos = discoverRepos()
+  const protocols = discoverProtocols()
+
+  const header = ["repo", ...protocols.map(p => `"${p.title}"`), "total"]
+  const rows: { repo: string; scores: (number | null)[]; total: number }[] = []
+
+  for (const repo of repos) {
+    const scores: (number | null)[] = []
+    for (const p of protocols) {
+      const analysisPath = join(ROOT, "reports/repo", `${p.number}-${p.name}`, `${repo.name}.md`)
+      scores.push(extractScore(analysisPath))
+    }
+    const total = scores.reduce((sum, s) => sum + (s ?? 0), 0)
+    rows.push({ repo: repo.name, scores, total })
+  }
+
+  rows.sort((a, b) => b.total - a.total)
+
+  const csvLines = [header.join(",")]
+  for (const row of rows) {
+    const scoreCells = row.scores.map(s => s !== null ? String(s) : "")
+    csvLines.push([row.repo, ...scoreCells, String(row.total)].join(","))
+  }
+
+  writeFileSync(SUMMARY_FILE, csvLines.join("\n") + "\n", "utf-8")
+  console.log(`\n✓ Summary written to summary.csv (${rows.length} repos × ${protocols.length} study areas)`)
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -852,20 +1126,14 @@ async function main() {
   const variantIdx = args.indexOf("--variant")
   const variant = variantIdx >= 0 ? args[variantIdx + 1] : CONFIG.defaultVariant
   const dryRun = args.includes("--dry-run")
-  const skipPerms = args.includes("--skip-permissions")
-  const skipPermsIdx = args.indexOf("--skip-permissions")
-  // CLI flag overrides config; default to config value (true by default)
-  const useSkipPerms = skipPerms
-    ? true
-    : skipPermsIdx < 0 && CONFIG.skipPermissions
-    ? true
-    : false
   const parallelIdx = args.indexOf("--parallel")
   const parallel = parallelIdx >= 0 ? parseInt(args[parallelIdx + 1], 10) : undefined
   const batchIdx = args.indexOf("--batch-size")
   const batchSize = batchIdx >= 0 ? parseInt(args[batchIdx + 1], 10) : CONFIG.defaultParallel
   const timeoutIdx = args.indexOf("--timeout")
   const timeout = timeoutIdx >= 0 ? parseInt(args[timeoutIdx + 1], 10) : CONFIG.defaultTimeoutMs
+  const repoFilterIdx = args.indexOf("--repos")
+  const repoFilter = repoFilterIdx >= 0 ? args[repoFilterIdx + 1].split(",") : undefined
 
   const positional = args.filter(a => !a.startsWith("--") && a !== cmd)
 
@@ -877,25 +1145,22 @@ async function main() {
       }
 
       case "run": {
-        if (positional.length < 2) throw new Error("Usage: ai-study run <protocol-ref> <group-ref> [options]")
-        await cmdRun(positional[0], positional[1], { model, variant, dryRun, skipPermissions: useSkipPerms, timeoutMs: timeout, primaryModel: CONFIG.primaryModel, backupModel: CONFIG.backupModel })
+        if (positional.length < 2) throw new Error("Usage: ai-study run <repo-name|hellosales> <protocol-ref> [options]")
+        await cmdRun(positional[0], positional[1], { model, variant, dryRun, timeoutMs: timeout, primaryModel: CONFIG.primaryModel, backupModel: CONFIG.backupModel })
         break
       }
 
       case "run-all": {
         const protoFilterIdx = args.indexOf("--protocols")
-        const groupFilterIdx = args.indexOf("--groups")
         const protocolFilter = protoFilterIdx >= 0 ? args[protoFilterIdx + 1].split(",") : undefined
-        const groupFilter = groupFilterIdx >= 0 ? args[groupFilterIdx + 1].split(",") : undefined
         await cmdRunAll({
           model,
           variant,
           dryRun,
-          skipPermissions: useSkipPerms,
           timeoutMs: timeout,
           parallel: parallel ?? CONFIG.defaultParallel,
           protocolFilter,
-          groupFilter,
+          repoFilter,
           primaryModel: CONFIG.primaryModel,
           backupModel: CONFIG.backupModel,
         })
@@ -904,21 +1169,51 @@ async function main() {
 
       case "run-loop": {
         const protoFilterIdx = args.indexOf("--protocols")
-        const groupFilterIdx = args.indexOf("--groups")
         const protocolFilter = protoFilterIdx >= 0 ? args[protoFilterIdx + 1].split(",") : undefined
-        const groupFilter = groupFilterIdx >= 0 ? args[groupFilterIdx + 1].split(",") : undefined
         await cmdRunLoop({
           model,
           variant,
           dryRun,
-          skipPermissions: useSkipPerms,
           batchSize,
           timeoutMs: timeout,
           protocolFilter,
-          groupFilter,
+          repoFilter,
           primaryModel: CONFIG.primaryModel,
           backupModel: CONFIG.backupModel,
         })
+        break
+      }
+
+      case "synthesize": {
+        const protoFilterIdx = args.indexOf("--protocols")
+        const protocolFilter = protoFilterIdx >= 0 ? args[protoFilterIdx + 1].split(",") : undefined
+        const allRepos = discoverRepos()
+        const allProtocols = discoverProtocols().filter(p => !protocolFilter || protocolFilter.includes(p.number))
+        for (const p of allProtocols) {
+          const missing = allRepos.filter(r => {
+            const path = join(ROOT, "reports/repo", `${p.number}-${p.name}`, `${r.name}.md`)
+            return !existsSync(path)
+          })
+          if (missing.length > 0) {
+            console.log(`[SKIP] ${p.title} — missing: ${missing.map(r => r.name).join(", ")}`)
+            continue
+          }
+          const prompt = buildSynthesisPrompt(p, allRepos)
+          const protoRel = `study-areas/${p.number}-${p.name}.md`
+          const synthFile = `prompts/synthesize.md`
+          mkdirSync(join(ROOT, "reports/final"), { recursive: true })
+          if (dryRun) {
+            console.log(`[DRY RUN] Synthesis: ${p.title}`)
+            continue
+          }
+          console.log(`[SYNTHESIS] ${p.title}`)
+          const { code } = await runOpenCode(prompt, protoRel, { model, variant, timeoutMs: timeout, primaryModel: CONFIG.primaryModel, backupModel: CONFIG.backupModel, extraFiles: [synthFile] })
+          if (code === 0) {
+            console.log(`[DONE]  Synthesis: ${p.title}`)
+          } else {
+            console.error(`[FAIL]  Synthesis: ${p.title} (exit ${code})`)
+          }
+        }
         break
       }
 
@@ -928,7 +1223,7 @@ async function main() {
       }
 
       default: {
-        throw new Error(`Unknown command: ${cmd}. Try: list, run, run-all, run-loop, status`)
+        throw new Error(`Unknown command: ${cmd}. Try: list, run, run-all, run-loop, synthesize, status`)
       }
     }
   } catch (err: unknown) {
