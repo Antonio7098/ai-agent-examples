@@ -41,13 +41,14 @@ interface Config {
   defaultVariant: string
   defaultParallel: number
   defaultTimeoutMs: number
+  skipPermissions: boolean
 }
 
 function loadConfig(): Config {
   try {
     return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"))
   } catch {
-    return { defaultModel: "minimax-coding-plan/MiniMax-M2.7", primaryModel: "minimax-coding-plan/MiniMax-M2.7", backupModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3, defaultTimeoutMs: 1800000 }
+    return { defaultModel: "minimax-coding-plan/MiniMax-M2.7", primaryModel: "minimax-coding-plan/MiniMax-M2.7", backupModel: "opencode/deepseek-v4-flash-free", defaultVariant: "high", defaultParallel: 3, defaultTimeoutMs: 1800000, skipPermissions: true }
   }
 }
 
@@ -852,6 +853,13 @@ async function main() {
   const variant = variantIdx >= 0 ? args[variantIdx + 1] : CONFIG.defaultVariant
   const dryRun = args.includes("--dry-run")
   const skipPerms = args.includes("--skip-permissions")
+  const skipPermsIdx = args.indexOf("--skip-permissions")
+  // CLI flag overrides config; default to config value (true by default)
+  const useSkipPerms = skipPerms
+    ? true
+    : skipPermsIdx < 0 && CONFIG.skipPermissions
+    ? true
+    : false
   const parallelIdx = args.indexOf("--parallel")
   const parallel = parallelIdx >= 0 ? parseInt(args[parallelIdx + 1], 10) : undefined
   const batchIdx = args.indexOf("--batch-size")
@@ -870,7 +878,7 @@ async function main() {
 
       case "run": {
         if (positional.length < 2) throw new Error("Usage: ai-study run <protocol-ref> <group-ref> [options]")
-        await cmdRun(positional[0], positional[1], { model, variant, dryRun, skipPermissions: skipPerms, timeoutMs: timeout, primaryModel: CONFIG.primaryModel, backupModel: CONFIG.backupModel })
+        await cmdRun(positional[0], positional[1], { model, variant, dryRun, skipPermissions: useSkipPerms, timeoutMs: timeout, primaryModel: CONFIG.primaryModel, backupModel: CONFIG.backupModel })
         break
       }
 
@@ -883,7 +891,7 @@ async function main() {
           model,
           variant,
           dryRun,
-          skipPermissions: skipPerms,
+          skipPermissions: useSkipPerms,
           timeoutMs: timeout,
           parallel: parallel ?? CONFIG.defaultParallel,
           protocolFilter,
@@ -903,7 +911,7 @@ async function main() {
           model,
           variant,
           dryRun,
-          skipPermissions: skipPerms,
+          skipPermissions: useSkipPerms,
           batchSize,
           timeoutMs: timeout,
           protocolFilter,

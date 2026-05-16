@@ -8,141 +8,121 @@
 |-------|-------|
 | Name | HelloSales |
 | Path | `HelloSales/` |
-| Group | `hellosales` |
-| Language / Stack | Python |
-| Analyzed | 2026-05-14 |
+| Group | `HelloSales` |
+| Language / Stack | Python (Pydantic + SQLAlchemy + Alembic) |
+| Analyzed | 2026-05-15 |
 
 ## Summary
 
-HelloSales implements a session-centric memory architecture with durable session items, LLM-based summarization, and extensible context assembly. Session items are append-only chronologically, with periodic summarization compressing history. Context is assembled at runtime via `ProfiledAgentContextAssembler` rather than stored pre-assembled. An `AgentContextBudget` enforces context limits with truncation tracking. Future retrieval seams (`FutureConversationRetrievalPort`) exist but are not yet implemented.
+HelloSales uses a domain-driven architecture with in-memory persistence stores for operational state (agent runs, sessions, workers, company profiles). It does not implement a generic memory abstraction; instead, state is persisted via SQLAlchemy models with SQLite for local development and PostgreSQL for production. Session items are stored with sequence tracking, and summarization tracking (`last_summarized_item_sequence`) exists but no active summarization logic was found.
 
 ## Evidence Collected
 
-Every entry MUST include a file path with line numbers. Format: `path/to/file.ts:NN`.
-
 | Area | Evidence | File:Line |
 |------|----------|-----------|
-| Session model | Session with session_id/actor_id/org_id/timestamps | `platform/sessions/models.py:47-67` |
-| SessionItem | Append-only item with sequence_no, type, payload | `platform/sessions/models.py:72-86` |
-| Item types | USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT, SYSTEM_NOTE | `platform/sessions/models.py:37-44` |
-| SessionSummary | Long-term memory with coverage_start/end_sequence | `platform/sessions/models.py:89-107` |
-| SessionAttachmentStore | Appends items, schedules summary | `platform/sessions/attachment.py:25-95` |
-| Summary scheduling | _schedule_summary_if_eligible checks interval | `platform/sessions/attachment.py:173-236` |
-| Summary generation | LLM compresses items; fallback to _fallback_summary | `platform/sessions/attachment.py:238-350` |
-| Session context source | build() filters summarized items, appends recent | `platform/agents/context.py:394-516` |
-| Context assembler | ProfiledAgentContextAssembler builds context from profiles | `platform/agents/context.py:212-385` |
-| Context budget | max_context_messages enforcement with truncation tracking | `platform/agents/context.py:50-55, 312-326` |
-| Context truncation record | source_id/original/emitted counts/reason | `platform/agents/context.py:124-132` |
-| Future retrieval seam | FutureConversationRetrievalPort protocol defined | `platform/agents/context.py:518-605` |
-| Retrieval category enum | RETRIEVAL, SEMANTIC_MEMORY, EPISODIC_MEMORY, PROCEDURAL_MEMORY | `platform/agents/context.py:21-29` |
-| Agent run model | AgentRun with status tracking | `platform/agents/models.py:53-75` |
-| Agent turn model | AgentTurn for individual turn state | `platform/agents/models.py:78-95` |
-| Agent tool call model | AgentToolCall with invocation state | `platform/agents/models.py:98-118` |
-| Run status enum | PENDING, RUNNING, AWAITING_APPROVAL, COMPLETED, FAILED, CANCELLED | `platform/agents/models.py:18-26` |
-| Agent store port | Protocol defining update_run/turn/tool_call operations | `platform/agents/persistence.py:17-64` |
-| Session store port | Protocol defining update_session/list_items operations | `platform/sessions/persistence.py:11-40` |
-| In-memory agent store | InMemoryAgentStore for testing | `platform/agents/memory.py:18-126` |
-| In-memory session store | InMemorySessionStore for testing | `platform/sessions/memory.py:11-72` |
-| SQLAlchemy repositories | SqlAlchemyAgentStore/SqlAlchemySessionStore implementations | `platform/db/repositories.py:149-482` |
-| SQLAlchemy models | AgentRunRecord, AgentTurnRecord, SessionRecord, SessionItemRecord | `platform/db/models.py:44-255` |
-| JSON serialization | json.dumps for payload/error serialization | `platform/db/models.py:5-7, 120-121` |
-| Agent loop runtime | messages list accumulates context | `platform/agents/runtime.py:246-283` |
-| Tool message replay | _replay_tool_messages extends messages | `platform/agents/runtime.py:284-285` |
+| InMemoryAgentStore | Ephemeral dict-based store for AgentRun, AgentTurn, AgentToolCall, AgentArtifact, AgentStreamEvent | `platform/agents/memory.py:18-126` |
+| InMemorySessionStore | Dict-based session and SessionItem storage with sequence tracking | `platform/sessions/memory.py:11-71` |
+| InMemoryWorkerStore | Dict-based WorkerRun and WorkerRunEvent storage | `platform/workers/memory.py:13-48` |
+| SessionItem sequence | Items tracked with `sequence_no` for ordering | `platform/sessions/models.py` |
+| Summarization tracking | `last_summarized_item_sequence` field on Session model | `platform/sessions/models.py` |
+| Agent persistence | `save_state`/`load_state` on `AssistantAgent` via BaseChatAgent | `autogen-core:base/_base_chat_agent.py:233-239` |
+| Company profile memory | InMemoryCompanyProfileRepository for test paths | `modules/company_profile/infra/memory.py:22-74` |
+| SQLite default | SQLAlchemy with SQLite for local dev | `platform/db/engine.py` |
+| PostgreSQL support | Alembic migrations support multiple backends | `backend/alembic.ini` |
+| Context injection | No evidence of memory-to-context injection | No evidence found |
 
 ## Answers to Protocol Questions
 
-1. **What types of memory does the system support?**
-   - **Scratchpad/Working Memory**: `messages` list in runtime.py accumulates context during turn
-   - **Episodic Memory**: `SessionItem` append-only sequence with type/payload; LLM summarization via `SessionSummary`
-   - **Retrieval Systems**: `FutureConversationRetrievalPort` defined but not implemented; no active RAG
-   - **Checkpointing/Durable State**: `AgentRun`, `AgentTurn`, `AgentToolCall` with status tracking
-   - **Execution State**: Runtime `messages` list; status enums track execution state
-   - **Conversational State**: SessionItem sequence with USER_MESSAGE/ASSISTANT_MESSAGE/TOOL_CALL types
-   - **Long-term vs Short-term**: SessionSummary is long-term (compressed); session items are short-term
+### 1. What types of memory does the system support?
 
-2. **Is memory persistent across sessions?**
-   - Yes: Sessions persist via `SessionRecord` in database
-   - SessionItems are append-only and survive across restarts
-   - SessionSummary compresses history and persists incrementally (coverage_start/end_sequence)
-   - Agent runs/turns also persisted for audit and resumption
+HelloSales supports:
+- **Working memory**: Python dicts in `InMemory*Store` classes, ephemeral per-process.
+- **Episodic memory**: `Session` + `SessionItem` tables store conversation items with `sequence_no`.
+- **Checkpointing**: `last_summarized_item_sequence` tracks summarization progress (field exists; no active summarizer found).
+- **No task-centric or RAG memory**: No evidence of memory retrieval or semantic search.
+- **No scratchpad abstraction**: Agent turns and tool calls are stored but not summarized or compressed.
 
-3. **How is memory compressed or summarized?**
-   - `_schedule_summary_if_eligible()` triggers after `session_summary_turn_interval` turns
-   - `_generate_summary()` calls LLM to compress session items into SessionSummary
-   - `coverage_start_sequence` and `coverage_end_sequence` track incremental summary coverage
-   - Fallback `_fallback_summary()` if LLM unavailable
-   - Context assembler filters items before `coverage_end_sequence` (already summarized)
+### 2. Is memory persistent across sessions?
 
-4. **How is memory integrated into LLM context?**
-   - `ProfiledAgentContextAssembler.build()` assembles context before LLM completion
-   - `BasicSessionContextSource.build()` fetches summary + items, inserts as system message
-   - `AgentContextBudget` enforces max_context_messages with truncation
-   - `AgentContextBuildRequest` contains run/turn/base_messages/effective_prompt/profile_id
-   - Runtime context assembly at `runtime.py:266-274`
+- **SQLite/PostgreSQL**: `Session`, `SessionItem`, `AgentRun`, `WorkerRun` persist via SQLAlchemy models.
+- **In-memory stores**: `InMemory*Store` classes are ephemeral — lost on restart.
+- **Session history**: `SessionItem` table stores conversation items with `session_id` and `sequence_no`, providing cross-session history.
+- **No evidence of persistent memory bank**: Task insights, user teachings, or learned patterns are not stored.
 
-5. **What storage backends are supported?**
-   - In-memory: `InMemoryAgentStore`, `InMemorySessionStore`, `InMemoryWorkerStore`
-   - SQLAlchemy: `SqlAlchemyAgentStore`, `SqlAlchemySessionStore` (Postgres/SQLite)
-   - All via port protocols: `AgentStorePort`, `SessionStorePort`, `WorkerStorePort`
+### 3. How is memory compressed or summarized?
 
-6. **How is memory retrieval triggered (automatic vs explicit)?**
-   - **Automatic**: Context assembly happens before every LLM completion in agent loop
-   - **Explicit**: Future `FutureConversationRetrievalPort` will support explicit retrieval
-   - No automatic RAG currently active; retrieval category enum exists but unimplemented
+- **No evidence of active compression**: The `last_summarized_item_sequence` field exists on `Session` (`platform/sessions/models.py`) but no implementation of a summarizer was found in the sessions module.
+- **No LLM-based summarization**: No `summarize` or `compress` logic in `session_service.py`.
+- **Retention policy**: Unknown — no pruning or TTL logic found.
 
-7. **What memory is shared between agents?**
-   - Session context source (`BasicSessionContextSource`) fetches memory per-run
-   - No evidence of shared memory between agents; each run has isolated context
-   - Resource profiles could provide cross-agent shared context but not deeply explored
+### 4. How is memory integrated into LLM context?
+
+- **No evidence found**: HelloSales does not appear to inject memory content into model context. Agent prompting uses system message and tool definitions only.
+- **Contrast with AutoGen**: AutoGen's `AssistantAgent` calls `memory.update_context()` pre-inference; HelloSales has no equivalent pattern.
+
+### 5. What storage backends are supported?
+
+- **SQLite**: Default for local development via SQLAlchemy (`platform/db/engine.py`).
+- **PostgreSQL**: Configured via `DATABASE_URL` with Alembic migrations (`backend/alembic.ini`, `backend/alembic/`).
+- **In-memory**: `InMemory*Store` classes for scaffolding and tests.
+- **No vector/embedding store**: No evidence of ChromaDB, pinecone, redis vector, or mem0.
+
+### 6. How is memory retrieval triggered (automatic vs explicit)?
+
+- **No retrieval found**: HelloSales stores state but does not retrieve memory to feed context.
+- **Session items queried by session_id**: `list_items(session_id)` returns items in sequence order (`platform/sessions/memory.py:58-61`).
+- **No semantic retrieval**: No RAG, no vector search, no keyword search over stored content.
+
+### 7. What memory is shared between agents?
+
+- **Database-backed state**: `AgentRun`, `Session`, `WorkerRun` tables can be shared via SQLite/PostgreSQL if multiple agents write to same DB.
+- **In-memory stores are isolated**: `InMemoryAgentStore`, `InMemorySessionStore`, `InMemoryWorkerStore` are per-process instances.
+- **No explicit shared memory mechanism**: No evidence of canvas, shared episodic memory, or task-centric memory shared between agents.
 
 ## Architectural Decisions
 
-- **Append-only session items**: No updates/deletes; maintains complete audit trail
-- **Summary-based compression**: Incremental summaries avoid re-processing old items
-- **Context assembly at runtime**: Context built from raw items rather than stored pre-assembled
-- **Budget enforcement with tracking**: Truncation recorded for observability
-- **Port/protocol separation**: In-memory for testing, SQLAlchemy for production
-- **Extensible context sources**: `AgentContextSource` protocol allows custom memory sources
+1. **Domain-driven state management**: State is split by domain (agents, sessions, workers, company_profile) rather than a unified memory store.
+2. **Persistence-first**: Operational state is designed for DB persistence from the start (SQLAlchemy models).
+3. **In-memory for scaffolding**: `InMemory*Store` classes enable testability without DB.
+4. **No generic memory abstraction**: Unlike AutoGen's `Memory` interface, HelloSales couples memory to specific domain models.
+5. **Sequence-based ordering**: All conversation items use `sequence_no` for ordering rather than timestamps.
 
 ## Notable Patterns
 
-- **Incremental summary coverage**: `coverage_end_sequence` allows skipping already-summarized items
-- **Summary scheduling**: Background task generates summaries after N turns
-- **Tool message replay**: Existing tool calls replayed into messages for context
-- **Future retrieval seam**: `FutureConversationRetrievalPort` designed for future RAG without code change
-- **Context budget enforcement**: Remaining messages tracked and truncated
+- `last_summarized_item_sequence` field suggests future summarization capability (field present, logic not implemented)
+- Dataclass `replace()` pattern used for immutability in in-memory stores (`platform/agents/memory.py:29-36`)
+- Dual-mode storage: in-memory dicts for scaffolding, SQLAlchemy for production persistence
+- `uuid4().hex` for ID generation in memory implementations
 
 ## Tradeoffs
 
-- **JSON vs typed serialization**: JSON payload stored as strings; no type safety without application-level parsing
-- **No automatic memory pruning**: Relies on summarization; unbounded item growth if summarization fails
-- **Single-session context**: No cross-session memory except via summarization
-- **Runtime assembly overhead**: Context built on every turn; could cache but invalidation complex
-- **In-memory stores not clustered**: InMemoryAgentStore not suitable for multi-instance deployment
+| Dimension | Approach | Tradeoff |
+|-----------|----------|----------|
+| Storage | SQLite/PostgreSQL vs in-memory | SQLite simple but limited concurrency; PG requires infrastructure |
+| Memory abstraction | Domain-coupled vs generic interface | Domain coupling is more type-safe; less flexible for new memory types |
+| State management | In-memory + DB backup | Complexity of keeping two stores consistent |
+| Context enrichment | None vs AutoGen-style injection | Simpler but agents cannot learn from past interactions |
 
 ## Failure Modes / Edge Cases
 
-- **Summary generation failure**: Falls back to `_fallback_summary()` but summary may be poor quality
-- **Context budget miscalculation**: Token count approximations may not match actual LLM context
-- **Item sequence gaps**: If items added during summary generation, coverage may overlap or gap
-- **In-memory store data loss**: InMemorySessionStore lost on restart; not suitable for production
-- **Truncation may lose critical context**: Budget-based truncation may cut important early context
+1. **In-memory stores lost on restart**: `InMemoryAgentStore`, `InMemorySessionStore` lose all data on process restart.
+2. **No memory retrieval**: Without context injection, agents cannot leverage stored history for better responses.
+3. **SQLite concurrency**: Default SQLite does not handle concurrent writes well; PG recommended for multi-agent scenarios.
+4. **No pruning/GC**: Session items grow indefinitely with no archival or pruning strategy.
+5. **last_summarized_item_sequence unused**: Field exists but summarization logic is not implemented — potential for future bugs.
 
 ## Implications for `HelloSales/`
 
-The HelloSales architecture is well-structured for memory management. Key learnings:
-
-- **Adopt incremental summary coverage**: LangGraph could use similar checkpoint chain with parent pointers
-- **Consider processor-based memory**: Mastra's processor pattern could enhance HelloSales context assembly
-- **Token-based triggers for summarization**: Mastra's thresholds (30k/40k) could trigger HelloSales summarization
-- **Extensible retrieval seams**: FutureConversationRetrievalPort pattern should be prioritized
-- **Memory scope separation**: Thread vs resource scoping as in Mastra could enable cross-session user memory
-- **Runtime injection**: Consider explicit Runtime struct for cleaner memory access pattern
+1. **Add memory abstraction**: Adopt a `Memory` interface similar to AutoGen's for pluggable memory implementations.
+2. **Implement context injection**: Before LLM inference, inject relevant session history or memories into context.
+3. **Add summarization**: Implement the summarization logic hinted at by `last_summarized_item_sequence`.
+4. **Consider task-centric memory**: For sales campaigns, store winning patterns/approaches as memos for retrieval on similar future campaigns.
+5. **Add vector store option**: If sales knowledge grows, ChromaDB or similar could enable semantic retrieval over company/product knowledge.
 
 ## Questions / Gaps
 
-- No evidence of vector/RAG retrieval implementation
-- Observational memory (dual-agent compression) not present
-- Cross-agent memory sharing mechanism not found
-- Checkpoint/snapshot for workflow state persistence not deeply implemented
-- Embedding model integration for semantic recall not present
+1. No evidence of LLM-based summarization logic — `last_summarized_item_sequence` appears to be an unimplemented field.
+2. No evidence of memory retrieval (RAG, vector search, keyword search) over stored session items.
+3. No evidence of cross-agent shared memory or canvas for collaboration.
+4. No evidence of checkpointing mechanism for durable agent execution state across restarts.
+5. Retention and pruning policy for session items not found — storage could grow unbounded.
