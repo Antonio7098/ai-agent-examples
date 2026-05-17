@@ -1,6 +1,6 @@
 {
-  "defaultModel": "minimax-coding-plan/MiniMax-M2.7",
-  "primaryModel": "minimax-coding-plan/MiniMax-M2.7",
+  "defaultModel": "opencode/deepseek-v4-flash-free",
+  "primaryModel": "opencode/deepseek-v4-flash-free",
   "backupModel": "opencode/deepseek-v4-flash-free",
   "defaultVariant": "high",
   "defaultParallel": 3,

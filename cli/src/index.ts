@@ -96,7 +96,7 @@ interface RunState {
 
 function discoverRepos(): Repo[] {
   return readdirSync(REPOS_DIR)
-    .filter(d => statSync(join(REPOS_DIR, d)).isDirectory() && !d.startsWith("."))
+    .filter(d => statSync(join(REPOS_DIR, d)).isDirectory() && !d.startsWith(".") && !/^\d{2}-/.test(d))
     .sort()
     .map(d => ({ name: d, path: join(REPOS_DIR, d) }))
 }
@@ -424,18 +424,35 @@ function createInitialState(allRepos: Repo[], allProtocols: Protocol[], batchSiz
       return task && task.status === "completed"
     })
     if (allDone && allRepos.length > 0) {
-      synthesisTasks.push({
-        protocolNumber: p.number,
-        protocolName: p.name,
-        protocolTitle: p.title,
-        status: "completed",
-        attempts: 1,
-        lastError: null,
-        lastAttemptAt: new Date().toISOString(),
-        nextRetryAt: null,
-        completedAt: new Date().toISOString(),
-      })
-      console.log(`  Synthesis for ${p.title} already complete — report found`)
+      const reportPath = join(ROOT, "reports/final", `${p.number}-${p.name}.md`)
+      const reportExists = existsSync(reportPath)
+      if (reportExists) {
+        synthesisTasks.push({
+          protocolNumber: p.number,
+          protocolName: p.name,
+          protocolTitle: p.title,
+          status: "completed",
+          attempts: 1,
+          lastError: null,
+          lastAttemptAt: new Date().toISOString(),
+          nextRetryAt: null,
+          completedAt: new Date().toISOString(),
+        })
+        console.log(`  Synthesis for ${p.title} already complete — report found`)
+      } else {
+        synthesisTasks.push({
+          protocolNumber: p.number,
+          protocolName: p.name,
+          protocolTitle: p.title,
+          status: "pending",
+          attempts: 0,
+          lastError: null,
+          lastAttemptAt: null,
+          nextRetryAt: null,
+          completedAt: null,
+        })
+        console.log(`  Synthesis for ${p.title} all repos done — queued for synthesis`)
+      }
     }
   }
 
@@ -499,20 +516,7 @@ function cmdStatus(): void {
   const grandTotal = analysisTotal + synthTotal
   const grandCompleted = analysisCompleted + synthCompleted
 
-  console.log(`\nRun started: ${state.createdAt}`)
-  console.log(`Last updated: ${state.updatedAt}`)
-  console.log(`Batch size: ${state.batchSize}`)
-  console.log(`Status: ${state.isComplete ? "✓ Complete" : "▶ In progress"}`)
-  console.log(`\nAnalyses: ${analysisCompleted}/${analysisTotal} (${analysisPct}%)`)
-  console.log(`  Completed: ${analysisCompleted}  Running: ${analysisRunning}  Failed: ${analysisFailed}  Pending: ${analysisPending}`)
-  if (synthTotal > 0) {
-    console.log(`Synthesis: ${synthCompleted}/${synthTotal}  Running: ${synthRunning}  Failed: ${synthFailed}  Pending: ${synthPending}`)
-  }
-  console.log(`Total: ${grandCompleted}/${grandTotal}`)
-  console.log("")
-
   if (analysisFailed > 0 || analysisPending > 0 || synthFailed > 0 || synthPending > 0) {
-    console.log("Remaining Analysis Tasks:")
     for (const t of state.tasks) {
       if (t.status === "completed") continue
       const label = `${t.protocolTitle} × ${t.repoName}`
@@ -541,6 +545,18 @@ function cmdStatus(): void {
     }
     console.log("")
   }
+
+  console.log(`\nRun started: ${state.createdAt}`)
+  console.log(`Last updated: ${state.updatedAt}`)
+  console.log(`Batch size: ${state.batchSize}`)
+  console.log(`Status: ${state.isComplete ? "✓ Complete" : "▶ In progress"}`)
+  console.log(`\nAnalyses: ${analysisCompleted}/${analysisTotal} (${analysisPct}%)`)
+  console.log(`  Completed: ${analysisCompleted}  Running: ${analysisRunning}  Failed: ${analysisFailed}  Pending: ${analysisPending}`)
+  if (synthTotal > 0) {
+    console.log(`Synthesis: ${synthCompleted}/${synthTotal}  Running: ${synthRunning}  Failed: ${synthFailed}  Pending: ${synthPending}`)
+  }
+  console.log(`Total: ${grandCompleted}/${grandTotal}`)
+  console.log("")
 }
 
 // ─── Commands ────────────────────────────────────────────────────────────────
